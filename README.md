@@ -1,4 +1,4 @@
-Site Price Scraper for Products with configirable CSS selectors per domain via a settings page. Price tracking over time in a graph with support for multiple links (product site links) per product for comparison.
+Site Price Scraper for Products with (optional) configurable CSS selectors per domain via a settings page. Price tracking over time in a graph with support for multiple links (product site links) per product for comparison. Logic tries multiple methods and attempts to pick correct price itself, use CSS selector if available if incorrect price is grabbed.
 
 Requires Node.js
 
