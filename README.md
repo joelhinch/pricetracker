@@ -12,4 +12,4 @@ Sample
 <img width="2188" height="1918" alt="image" src="https://github.com/user-attachments/assets/3d132b5c-717f-49eb-b959-b4b1a5d4c6e3" />
 
 Example Settings Page
-<img width="2182" height="1146" alt="image" src="https://github.com/user-attachments/assets/19030951-7d5a-4516-9123-43a6c906eeb4" />
+<img width="2182" height="1146" alt="image" src="https://github.com/user-attachments/assets/363aba1b-6ced-477a-97df-5c8ed07e9a7a" />
