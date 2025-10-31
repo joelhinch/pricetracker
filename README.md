@@ -7,3 +7,9 @@ Run 'npm install' in root to install dependancies
 Run 'node server.js' in root to start
 
 Data will be stored in /data/db.json and /data/settings.json
+
+Sample
+<img width="2188" height="1918" alt="image" src="https://github.com/user-attachments/assets/3d132b5c-717f-49eb-b959-b4b1a5d4c6e3" />
+
+Example Settings Page
+<img width="2182" height="1146" alt="image" src="https://github.com/user-attachments/assets/19030951-7d5a-4516-9123-43a6c906eeb4" />
