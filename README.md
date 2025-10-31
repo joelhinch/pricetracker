@@ -2,7 +2,8 @@ Site Price Scraper for Products with configirable CSS selectors per domain via a
 
 Requires Node.js
 
-Run npm install in root to install depandancies
+Run npm install in root to install dependancies
+
 Run node server.js in root to start
 
 Data will be stored in /data/db.json and /data/settings.json
