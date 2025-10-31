@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Settings — Domain Selectors</title>
+  <style>
+:root {
+  --bg: #f8fafc;
+  --card: #ffffff;
+  --muted: #6b7280;
+  --text: #0b1220;
+  --accent-teal: #06b6a4;
+  --accent-indigo: #4f46e5;
+  --flat-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  --radius: 10px;
+  --divider: rgba(0, 0, 0, 0.05);
+  --ui: 160ms cubic-bezier(.2, .9, .25, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+/* --- HEADER --- */
+header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  background: white;
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--accent-indigo);
+}
+
+/* Center block between title and button */
+.header-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+}
+
+.header-title {
+  font-weight: 700;
+  color: var(--accent-indigo);
+}
+
+.header-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+
+/* --- BUTTONS (matches index.html) --- */
+.btn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: background var(--ui);
+}
+
+.btn-primary {
+  background: linear-gradient(90deg, var(--accent-teal), #10b981);
+  color: white;
+}
+
+.btn-outline {
+  background: white;
+  border: 1px solid #dce3eb;
+  color: var(--accent-indigo);
+}
+
+.btn-danger {
+  background: #ef4444;
+  color: white;
+}
+
+/* --- MAIN CONTENT --- */
+main {
+  padding-top: 80px;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* --- CARD --- */
+.card {
+  background: var(--card);
+  padding: 14px;
+  border-radius: var(--radius);
+  box-shadow: var(--flat-shadow);
+}
+
+/* --- FORM ELEMENTS --- */
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+input[type=text] {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #eaf2fb;
+  font-size: 0.9rem;
+}
+
+/* --- TABLE --- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+th, td {
+  padding: 8px;
+  border-bottom: 1px solid #eef2f7;
+  text-align: left;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+</style>
+
+</head>
+<body>
+<header>
+  <h1>💰 Price Tracker</h1>
+  <div class="header-center">
+    <div class="header-title">Settings</div>
+    <div class="header-desc">Domain selectors</div>
+  </div>
+  <button id="backBtn" class="btn btn-outline">← Back</button>
+</header>
+  <main>
+    <div class="card">
+      <div style="font-size:1rem;font-weight:700;color:var(--accent-indigo);margin-bottom:8px">Domain Selectors</div>
+      <div style="color:var(--muted);margin-bottom:12px">Define CSS selectors per domain to help scraping.</div>
+      <div class="row">
+        <input id="domainInput" type="text" placeholder="Domain (e.g. mwave.com.au)">
+        <input id="selectorInput" type="text" placeholder="Selector (e.g. .price span)">
+        <button id="addDomainBtn" class="btn btn-primary">Add</button>
+      </div>
+      <table id="domainsTable">
+<thead><tr><th>Domain</th><th>Selector</th><th>Scraper Type</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+        <button id="saveBtn" class="btn btn-primary">Save Changes</button>
+        <button id="reloadBtn" class="btn btn-outline">Reload</button>
+      </div>
+    </div>
+  </main>
+  <script>
+    const $ = (s,r=document)=>r.querySelector(s);
+    const $$ = (s,r=document)=>Array.from((r||document).querySelectorAll(s));
+    $('#backBtn').addEventListener('click', ()=> { window.location.href = './index.html'; });
+    async function loadDomains(){ try{ const res = await fetch('/api/settings/domains'); const data = await res.json(); const tbody = $('#domainsTable tbody'); tbody.innerHTML=''; data.forEach(d=>{ const tr = document.createElement('tr'); tr.innerHTML = `
+  <td><input value="${d.domain}" data-field="domain"></td>
+  <td><input value="${d.selector||''}" data-field="selector"></td>
+  <td>
+    <select data-field="scraper">
+  <option value="auto" ${d.scraper==='auto'?'selected':''}>Auto</option>
+<option value="simple" ${d.scraper==='simple'?'selected':''}>Simple</option>
+<option value="puppeteer" ${d.scraper==='puppeteer'?'selected':''}>Puppeteer</option>
+
+    </select>
+  </td>
+  <td><button data-delete class="btn btn-outline">Delete</button></td>
+`; tbody.appendChild(tr); }); }catch(e){console.warn(e);} }
+    $('#addDomainBtn').addEventListener('click', ()=>{ const domain=$('#domainInput').value.trim(); const selector=$('#selectorInput').value.trim(); if(!domain||!selector){alert('Enter both');return;} const tbody=$('#domainsTable tbody'); const tr=document.createElement('tr'); tr.innerHTML=`
+  <td><input value="${domain}" data-field="domain"></td>
+  <td><input value="${selector}" data-field="selector"></td>
+  <td>
+    <select data-field="scraper">
+      <option value="auto" selected>Auto</option>
+      <option value="simple">Simple</option>
+      <option value="puppeteer">Puppeteer</option>
+    </select>
+  </td>
+  <td><button data-delete class="btn btn-outline">Delete</button></td>
+`;
+ tbody.appendChild(tr); $('#domainInput').value=''; $('#selectorInput').value=''; });
+    document.addEventListener('click',(ev)=>{ if(ev.target.matches('[data-delete]')) ev.target.closest('tr').remove(); });
+    $('#saveBtn').addEventListener('click', async ()=>{ const rows = $$('#domainsTable tbody tr'); const payload = rows.map(r=>{ const domain = r.querySelector('[data-field="domain"]').value.trim(); const selector = r.querySelector('[data-field="selector"]').value.trim();
+const scraper = r.querySelector('[data-field="scraper"]').value;
+return domain ? { domain, selector, scraper } : null;
+ }).filter(Boolean); try{ await fetch('/api/settings/domains',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }); alert('Saved'); }catch(e){alert('Save failed');} });
+    $('#reloadBtn').addEventListener('click', loadDomains);
+    loadDomains();
+  </script>
+</body>
+</html>
