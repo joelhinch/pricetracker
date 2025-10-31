@@ -110,7 +110,7 @@ function cleanPriceText(text) {
 }
 
 async function fetchPriceSimple(url, customSelector = null) {
-  console.log(`🟢 [Simple] Fetching ${url} ${customSelector ? `(selector: ${customSelector})` : ""}`);
+  console.log(`[Simple] Fetching ${url} ${customSelector ? `(selector: ${customSelector})` : ""}`);
   try {
     const domain = new URL(url).hostname.replace(/^www\./, "");
     const res = await axios.get(url, {
@@ -125,7 +125,7 @@ async function fetchPriceSimple(url, customSelector = null) {
     });
 
     if (res.status >= 400) {
-      console.log(`   ❌ Bad status: ${res.status}`);
+      console.log(`   Bad status: ${res.status}`);
       return null;
     }
     const $ = cheerio.load(res.data);
@@ -138,15 +138,15 @@ async function fetchPriceSimple(url, customSelector = null) {
       const el = $(sel).first();
       text = (el.text() || el.attr("content") || "").trim();
       if (text) {
-        console.log(`   💰 Found text from selector '${sel}': '${text}'`);
+        console.log(`   Found text from selector '${sel}': '${text}'`);
         break;
       }
     }
 
     if (!text) {
-      console.log(`   ⚙️ Fallback to og:price:amount`);
+      console.log(`   Fallback to og:price:amount`);
       text = $("meta[property='og:price:amount']").attr("content");
-      if (text) console.log(`   💰 Found from og meta: '${text}'`);
+      if (text) console.log(`   Found from og meta: '${text}'`);
     }
 
     if (!text) {
@@ -154,18 +154,18 @@ async function fetchPriceSimple(url, customSelector = null) {
       const match = $.root().text().match(/[$£€]\s?[\d.,]+/);
       if (match) {
         text = match[0];
-        console.log(`   💰 Found from regex: '${text}'`);
+        console.log(`   Found from regex: '${text}'`);
       }
     }
 
     if (!text) {
-      console.log(`   ❌ No price text found`);
+      console.log(`   No price text found`);
       return null;
     }
 
     text = text.replace(/,/g, "");
     const val = parseFloat(text.replace(/[^\d.]/g, ""));
-    console.log(`   ✅ Parsed price: $${val}`);
+    console.log(`   Parsed price: $${val}`);
     return isNaN(val) ? null : val;
   } catch (e) {
     console.warn(`[Simple] Failed for ${url}:`, e.message || e);
@@ -344,7 +344,7 @@ if (!el) {
           .map(t => {
             let raw = t.replace(/[^0-9.]/g, "");
             let n = parseFloat(raw);
-            // ✅ Fix: only divide if no decimal and value too large
+            // Fix: only divide if no decimal and value too large
             if (!isNaN(n)) {
               if (!raw.includes(".") && n > 9999) n = n / 100;
               n = Math.round((n + Number.EPSILON) * 100) / 100; // two decimals max
@@ -355,10 +355,10 @@ if (!el) {
 
         if (found.length) {
           const chosen = Math.min(...found);
-          console.log(`[PUPPETEER] ✅ Custom selector '${sel}' matched, forcing price $${chosen}`);
+          console.log(`[PUPPETEER] Custom selector '${sel}' matched, forcing price $${chosen}`);
           customSelectorSuccess = true;
           try { await browser.close(); } catch {}
-          return chosen; // 🔥 absolute priority — stop here
+          return chosen; // absolute priority — stop here
         } else {
           console.log(`[PUPPETEER] Custom selector '${sel}' found but no valid numeric values`);
         }
@@ -371,7 +371,7 @@ if (!el) {
   }
 
   if (usedCustomSelector && !customSelectorSuccess) {
-    console.warn(`[PUPPETEER] ⚠️ Custom selector '${customSelector}' was defined but failed to yield a price`);
+    console.warn(`[PUPPETEER] Custom selector '${customSelector}' was defined but failed to yield a price`);
   }
 }
 
@@ -682,7 +682,7 @@ app.post('/api/items/reorder', (req, res) => {
     // normalize positions
     items.forEach((it, i) => (it.position = i));
 
-    saveDb(); // ✅ your existing helper
+    saveDb(); // your existing helper
 
     res.json({ success: true, itemsCount: items.length });
   } catch (err) {
@@ -886,7 +886,7 @@ app.delete("/api/settings/:domain", (req, res) => {
 app.get("/api/health", (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
 
 cron.schedule("0 */12 * * *", async () => {
-  console.log("⏰ Auto-update triggered");
+  console.log("Auto-update triggered");
   try {
     await axios.post(`http://localhost:${PORT}/api/items/updateAll`);
   } catch (e) {
@@ -895,5 +895,5 @@ cron.schedule("0 */12 * * *", async () => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Server listening on http://localhost:${PORT}`);
+  console.log(`Server listening on http://localhost:${PORT}`);
 });
