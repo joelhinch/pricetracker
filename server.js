@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import fs from "fs";
 import path from "path";
@@ -29,6 +28,15 @@ const GENERIC_PRICE_SELECTORS = [
   ".divPriceNormal",
   ".sprice",
   ".a-price-whole"
+];
+
+const OOS_KEYWORDS = [
+  "out of stock",
+  "sold out",
+  "unavailable",
+  "no longer available",
+  "temporarily unavailable",
+  "temporarily out of stock"
 ];
 
 const __filename = fileURLToPath(import.meta.url);
@@ -126,13 +134,20 @@ async function fetchPriceSimple(url, customSelector = null) {
 
     if (res.status >= 400) {
       console.log(`   Bad status: ${res.status}`);
-      return null;
+      return { price: null, error: "bad status" };
     }
     const $ = cheerio.load(res.data);
+
+    const bodyText = $.root().text().toLowerCase();
+    if (OOS_KEYWORDS.some(kw => bodyText.includes(kw))) {
+      console.log(`   Out of stock detected`);
+      return { price: null, error: "out of stock" };
+    }
+
     let text = null;
 
     let selectors = customSelector ? [customSelector] : GENERIC_PRICE_SELECTORS;
-    console.log(`   🔍 Using selectors: ${selectors.join(', ')}`);
+    console.log(`   Using selectors: ${selectors.join(', ')}`);
 
     for (const sel of selectors) {
       const el = $(sel).first();
@@ -150,7 +165,7 @@ async function fetchPriceSimple(url, customSelector = null) {
     }
 
     if (!text) {
-      console.log(`   ⚙️ Fallback to regex scan`);
+      console.log(`   Fallback to regex scan`);
       const match = $.root().text().match(/[$£€]\s?[\d.,]+/);
       if (match) {
         text = match[0];
@@ -160,25 +175,26 @@ async function fetchPriceSimple(url, customSelector = null) {
 
     if (!text) {
       console.log(`   No price text found`);
-      return null;
+      return { price: null, error: "no price found" };
     }
 
     text = text.replace(/,/g, "");
     const val = parseFloat(text.replace(/[^\d.]/g, ""));
     console.log(`   Parsed price: $${val}`);
-    return isNaN(val) ? null : val;
+    return { price: isNaN(val) ? null : val, error: null };
   } catch (e) {
     console.warn(`[Simple] Failed for ${url}:`, e.message || e);
-    return null;
+    return { price: null, error: e.message || "unknown error" };
   }
 }
+
+//begin puppeteer function 
 
 async function fetchPriceWithPuppeteer(url, customSelector = null) {
   let browser;
   const domain = new URL(url).hostname.replace(/^www\./, "");
-//  const screenshotPath = `debug_${domain.replace(/\./g, "_")}_${Date.now()}.png`;
+
   try {
-    // launch
     browser = await puppeteer.launch({
       headless: true,
       args: [
@@ -193,12 +209,10 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
 
     const page = await browser.newPage();
 
-    // user agent + headers
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36");
     await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     page.setDefaultNavigationTimeout(60000);
 
-    // stealth-ish tweaks
     try {
       await page.evaluateOnNewDocument(() => {
         try {
@@ -209,15 +223,11 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
         } catch (e) { /* harmless */ }
       });
     } catch (e) {
-      // ignore if evaluateOnNewDocument not supported in env
+      // ignore
     }
 
-    // Collect candidate prices from multiple sources, then pick most frequent
     const candidates = [];
 
-    // -----------------------
-    // 1) JSON response sniffing
-    // -----------------------
     page.on("response", async (response) => {
       try {
         const headers = response.headers();
@@ -227,7 +237,6 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
           try { data = await response.json(); } catch { return; }
           const str = JSON.stringify(data);
 
-          // collect all matches
           const all = [
             ...str.matchAll(/"priceDisplay"\s*:\s*"?\$?([\d.,]+)/g),
             ...str.matchAll(/"salePrice"\s*:\s*"?\$?([\d.,]+)/g),
@@ -235,7 +244,7 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
           ];
           for (const m of all) {
             let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
-if (!isNaN(n) && n > 9999) n = n / 100; // normalize cents → dollars
+            if (!isNaN(n) && n > 9999) n = n / 100;
             if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
           }
         }
@@ -244,141 +253,117 @@ if (!isNaN(n) && n > 9999) n = n / 100; // normalize cents → dollars
       }
     });
 
-    // -----------------------
-    // 2) Load the page (lightweight pattern that worked for JW/Bunnings)
-    // -----------------------
     try {
       await page.goto(url, { waitUntil: "domcontentloaded" });
     } catch (e) {
       console.warn(`[PUPPETEER] Navigation warning for ${url}: ${e.message || e}`);
     }
-    // give JS time to render (universal)
     await new Promise(r => setTimeout(r, 2500));
 
-    // screenshot for debugging (helps confirm page visually rendered)
-//    try {
-//      await page.screenshot({ path: screenshotPath, fullPage: true });
- //     console.log(`[PUPPETEER] Saved screenshot: ${screenshotPath}`);
- //   } catch (e) {
-  //    console.warn(`[PUPPETEER] Screenshot failed: ${e.message || e}`);
-   // }
-
-// -----------------------
-// 3) Inline HTML JSON scan (page.content) — runs early
-// -----------------------
-try {
-  const html = await page.content();
-
-  // Find any numeric value assigned to keys like price, amount, salePrice, etc.,
-  // even if nested inside objects or arrays.
-  const pricePatterns = [
-    /"priceDisplay"\s*:\s*"?\$?([\d.,]+)/gi,
-    /"salePrice"\s*:\s*"?\$?([\d.,]+)/gi,
-    /"price"\s*:\s*"?\$?([\d.,]+)/gi,
-    /"price"\s*:\s*{\s*"amount"\s*:\s*([\d.]+)/gi,
-    /"amount"\s*:\s*([\d.]+)\s*(?:,|\})/gi,
-    /'priceDisplay'\s*:\s*'?\\?\$?([\d.,]+)/gi
-  ];
-
-  let totalMatches = 0;
-
-  for (const pattern of pricePatterns) {
-    const matches = [...html.matchAll(pattern)];
-    totalMatches += matches.length;
-
-    for (const m of matches) {
-      let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
-      if (!isNaN(n) && n > 9999) n = n / 100; // normalize cents → dollars
-      if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
+    const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase() || '');
+    if (OOS_KEYWORDS.some(kw => bodyText.includes(kw))) {
+      console.log(`[PUPPETEER] Out of stock detected`);
+      await browser.close().catch(() => {});
+      return { price: null, error: "out of stock" };
     }
-  }
 
-  // Extra: deep nested generic finder
-  // Matches things like "price":{"value":{"amount":429}} or arrays of prices
-  const deepMatches = [
-    ...html.matchAll(/"price"\s*"\s*[{:,"']+[^}{"']*?([\d.]+)[^}]*?}/gi),
-    ...html.matchAll(/"amount"\s*[:=]\s*"?([\d.,]+)"?/gi)
-  ];
-  for (const m of deepMatches) {
-    let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
-    if (!isNaN(n) && n > 9999) n = n / 100;
-    if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
-  }
-  totalMatches += deepMatches.length;
+    try {
+      const html = await page.content();
 
-  if (totalMatches)
-    console.log(`[PUPPETEER] Inline HTML JSON matches (nested supported): ${totalMatches}`);
-} catch (e) {
-  console.warn(`[PUPPETEER] Inline HTML scan failed: ${e.message || e}`);
-}
+      const pricePatterns = [
+        /"priceDisplay"\s*:\s*"?\$?([\d.,]+)/gi,
+        /"salePrice"\s*:\s*"?\$?([\d.,]+)/gi,
+        /"price"\s*:\s*"?\$?([\d.,]+)/gi,
+        /"price"\s*:\s*{\s*"amount"\s*:\s*([\d.]+)/gi,
+        /"amount"\s*:\s*([\d.]+)\s*(?:,|\})/gi,
+        /'priceDisplay'\s*:\s*'?\\?\$?([\d.,]+)/gi
+      ];
 
-/// -----------------------
-// 4) Custom selector from settings.json (absolute priority)
-// -----------------------
-if (customSelector) {
-  let usedCustomSelector = true;
-  let customSelectorSuccess = false;
+      let totalMatches = 0;
 
-  try {
-    const selList = customSelector.split(",").map(s => s.trim()).filter(Boolean);
-    for (const sel of selList) {
-      try {
-        const el = await page.$(sel);
-if (!el) {
-  console.log(`[PUPPETEER] Custom selector '${sel}' not found, retrying after 10s...`);
-  await new Promise(r => setTimeout(r, 10000));
-  const retryEl = await page.$(sel);
-  if (!retryEl) {
-    console.log(`[PUPPETEER] Custom selector '${sel}' still not found after retry`);
-    continue;
-  }
-}
+      for (const pattern of pricePatterns) {
+        const matches = [...html.matchAll(pattern)];
+        totalMatches += matches.length;
 
-        const txt = await page.$eval(sel, el => (el.innerText || el.textContent || "").trim());
-        if (!txt) {
-          console.log(`[PUPPETEER] Custom selector '${sel}' found but empty`);
-          continue;
+        for (const m of matches) {
+          let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
+          if (!isNaN(n) && n > 9999) n = n / 100;
+          if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
         }
+      }
 
-        const found = (txt.match(/[$£€]?\s?[\d\.,]+/g) || [])
-          .map(t => {
-            let raw = t.replace(/[^0-9.]/g, "");
-            let n = parseFloat(raw);
-            // Fix: only divide if no decimal and value too large
-            if (!isNaN(n)) {
-              if (!raw.includes(".") && n > 9999) n = n / 100;
-              n = Math.round((n + Number.EPSILON) * 100) / 100; // two decimals max
+      const deepMatches = [
+        ...html.matchAll(/"price"\s*"\s*[{:,"']+[^}{"']*?([\d.]+)[^}]*?}/gi),
+        ...html.matchAll(/"amount"\s*[:=]\s*"?([\d.,]+)"?/gi)
+      ];
+      for (const m of deepMatches) {
+        let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
+        if (!isNaN(n) && n > 9999) n = n / 100;
+        if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
+      }
+      totalMatches += deepMatches.length;
+
+      if (totalMatches) console.log(`[PUPPETEER] Inline HTML JSON matches (nested supported): ${totalMatches}`);
+    } catch (e) {
+      console.warn(`[PUPPETEER] Inline HTML scan failed: ${e.message || e}`);
+    }
+
+    if (customSelector) {
+      let usedCustomSelector = true;
+      let customSelectorSuccess = false;
+
+      try {
+        const selList = customSelector.split(",").map(s => s.trim()).filter(Boolean);
+        for (const sel of selList) {
+          try {
+            let el = await page.$(sel);
+            if (!el) {
+              console.log(`[PUPPETEER] Custom selector '${sel}' not found, retrying after 10s...`);
+              await new Promise(r => setTimeout(r, 10000));
+              el = await page.$(sel);
+              if (!el) {
+                console.log(`[PUPPETEER] Custom selector '${sel}' still not found after retry`);
+                continue;
+              }
             }
-            return n;
-          })
-          .filter(n => n && n > 0 && n < 100000);
 
-        if (found.length) {
-          const chosen = Math.min(...found);
-          console.log(`[PUPPETEER] Custom selector '${sel}' matched, forcing price $${chosen}`);
-          customSelectorSuccess = true;
-          try { await browser.close(); } catch {}
-          return chosen; // absolute priority — stop here
-        } else {
-          console.log(`[PUPPETEER] Custom selector '${sel}' found but no valid numeric values`);
+            const txt = await page.$eval(sel, el => (el.innerText || el.textContent || "").trim());
+            if (!txt) {
+              console.log(`[PUPPETEER] Custom selector '${sel}' found but empty`);
+              continue;
+            }
+
+            // Improved parsing: treat the entire text as one potential price, removing non-digits/dots
+            const cleaned = txt.replace(/[^0-9.]/g, '');
+            if (!cleaned) continue;
+
+            let n = parseFloat(cleaned);
+            const hasDecimalInRaw = cleaned.includes('.');
+            if (!hasDecimalInRaw && n > 9999) n /= 100;
+            n = Math.round((n + Number.EPSILON) * 100) / 100;
+
+            if (!isNaN(n) && n > 0 && n < 100000) {
+              console.log(`[PUPPETEER] Custom selector '${sel}' yielded price $${n} (cleaned: '${cleaned}')`);
+              customSelectorSuccess = true;
+              await browser.close().catch(() => {});
+              return { price: n, error: null };
+            } else {
+              console.log(`[PUPPETEER] Custom selector '${sel}' cleaned to invalid price: '${cleaned}'`);
+            }
+          } catch (e) {
+            console.warn(`[PUPPETEER] Error checking custom selector '${sel}': ${e.message || e}`);
+          }
         }
       } catch (e) {
-        console.warn(`[PUPPETEER] Error checking custom selector '${sel}': ${e.message || e}`);
+        console.warn(`[PUPPETEER] Custom selector scan failed: ${e.message || e}`);
+      }
+
+      if (usedCustomSelector && !customSelectorSuccess) {
+        console.warn(`[PUPPETEER] Custom selector '${customSelector}' was defined but failed to yield a price`);
       }
     }
-  } catch (e) {
-    console.warn(`[PUPPETEER] Custom selector scan failed: ${e.message || e}`);
-  }
 
-  if (usedCustomSelector && !customSelectorSuccess) {
-    console.warn(`[PUPPETEER] Custom selector '${customSelector}' was defined but failed to yield a price`);
-  }
-}
-
-    // -----------------------
-    // 5) Domain-specific or generic selectors
-    // -----------------------
-    if (!settings) settings = []; // defensive
+    if (!settings) settings = [];
     try {
       const domainKey = typeof selectorMap !== "undefined"
         ? Object.keys(selectorMap).find(k => domain.endsWith(k))
@@ -390,55 +375,48 @@ if (!el) {
           if (!el) continue;
           const txt = await page.$eval(sel, el => (el.innerText || el.textContent || "").trim());
           if (!txt) continue;
-const found = (txt.match(/[$£€]?\s?[\d\.,]+/g) || [])
-  .map(t => {
-    let n = parseFloat(t.replace(/[^0-9.]/g, ""));
-    if (!isNaN(n) && n > 9999) n = n / 100;
-    return n;
-  })
-  .filter(n => n && n > 0 && n < 100000);
+          const found = (txt.match(/[$£€]?\s?[\d\.,]+/g) || [])
+            .map(t => {
+              let n = parseFloat(t.replace(/[^0-9.]/g, ""));
+              if (!isNaN(n) && n > 9999) n = n / 100;
+              return n;
+            })
+            .filter(n => n && n > 0 && n < 100000);
           if (found.length) {
+            candidates.push(...found);
             console.log(`[PUPPETEER] Selector ${sel} gave candidates: ${found.join(", ")}`);
-            break; // stop after first successful selector to respect priority
+            break;
           }
         } catch {}
       }
     } catch (e) {
-      // ignore selectorMap errors
+      // ignore
     }
 
-    // -----------------------
-    // 6) Split-price re-assembly (rare)
-    // -----------------------
+    // Always attempt reassembly, even if candidates exist, to capture split prices
     try {
-      if (candidates.length === 0) {
-        for (const sel of GENERIC_PRICE_SELECTORS) {
-          try {
-            const containerSel = sel.replace(/ .*$/, "");
-            const container = await page.$(containerSel);
-            if (!container) continue;
-            const assembled = await container.evaluate(p =>
-              Array.from(p.querySelectorAll("span"))
-                .map(s => s.textContent.trim())
-                .filter(t => /[\d,$.,]/.test(t))
-                .join("")
-            );
-            if (assembled && /\d/.test(assembled)) {
-              const n = parseFloat(assembled.replace(/[^\d.]/g, ""));
-              if (!isNaN(n) && n > 0 && n < 100000) {
-                candidates.push(n);
-                console.log(`[PUPPETEER] Reassembled price from ${containerSel}: ${n} (assembled: '${assembled}')`);
-                break;
-              }
+      for (const sel of GENERIC_PRICE_SELECTORS) {
+        try {
+          const containerSel = sel.replace(/ .*$/, "");
+          const container = await page.$(containerSel);
+          if (!container) continue;
+          const assembled = await container.evaluate(p =>
+            Array.from(p.querySelectorAll("span"))
+              .map(s => s.textContent.trim())
+              .filter(t => /[\d,$.,]/.test(t))
+              .join("")
+          );
+          if (assembled && /\d/.test(assembled)) {
+            const n = parseFloat(assembled.replace(/[^\d.]/g, ""));
+            if (!isNaN(n) && n > 0 && n < 100000) {
+              candidates.push(n);
+              console.log(`[PUPPETEER] Reassembled price from ${containerSel}: ${n} (assembled: '${assembled}')`);
             }
-          } catch {}
-        }
+          }
+        } catch {}
       }
     } catch (e) { /* ignore */ }
 
-    // -----------------------
-    // 7) Full text fallback
-    // -----------------------
     try {
       if (candidates.length === 0) {
         const bodyText = await page.evaluate(() => document.body.innerText || "");
@@ -448,28 +426,36 @@ const found = (txt.match(/[$£€]?\s?[\d\.,]+/g) || [])
         const values = matches
           .map(t => parseFloat(t.replace(/[^0-9.]/g, "")))
           .filter(v => v && v > 0 && v < 100000);
-        for (const n of values) candidates.push(n);
+        candidates.push(...values);
         if (values.length) console.log(`[PUPPETEER] Full-text candidates: ${values.join(", ")}`);
       }
     } catch (e) {
       // ignore
     }
 
-    // -----------------------
-    // 8) Choose final price from candidates
-    // -----------------------
     let finalPrice = null;
     if (candidates.length > 0) {
-      // compute frequency map
       const counts = {};
       for (const v of candidates) {
-        counts[v] = (counts[v] || 0) + 1;
+        // Round to 2 decimals for counting to avoid floating point issues
+        const rounded = Math.round((v + Number.EPSILON) * 100) / 100;
+        counts[rounded] = (counts[rounded] || 0) + 1;
       }
-      // entries sorted by frequency desc, then value asc
       const sorted = Object.entries(counts).sort((a, b) => {
-        const freq = b[1] - a[1];
-        if (freq !== 0) return freq;
-        return parseFloat(a[0]) - parseFloat(b[0]);
+        const freqDiff = b[1] - a[1];
+        if (freqDiff !== 0) return freqDiff;
+
+        const valA = parseFloat(a[0]);
+        const valB = parseFloat(b[0]);
+
+        // Prefer values with fractional parts (e.g., 67.23 over 67 or 23)
+        const fracA = Math.abs(valA % 1) > 0.001 ? 1 : 0;
+        const fracB = Math.abs(valB % 1) > 0.001 ? 1 : 0;
+        const fracDiff = fracB - fracA;
+        if (fracDiff !== 0) return fracDiff;
+
+        // If tie, prefer smaller value (assuming sale/current price is lower)
+        return valA - valB;
       });
       finalPrice = parseFloat(sorted[0][0]);
       console.log(`[PUPPETEER] Candidates: ${[...new Set(candidates)].join(", ")} → chosen: $${finalPrice}`);
@@ -477,17 +463,23 @@ const found = (txt.match(/[$£€]?\s?[\d\.,]+/g) || [])
       console.log(`[PUPPETEER] No price candidates found for ${url}`);
     }
 
-    // close and return
-    try { await browser.close(); } catch (e) {}
-    return finalPrice || null;
+    let error = null;
+    if (finalPrice === null) {
+      error = "no price found";
+    }
+
+    await browser.close().catch(() => {});
+    return { price: finalPrice || null, error };
 
   } catch (err) {
-    if (browser) try { await browser.close(); } catch (e) {}
-    console.warn(`[PUPPETEER] Failed for ${url}: ${err && err.message ? err.message : err}`);
-    return null;
+    if (browser) await browser.close().catch(() => {});
+    console.warn(`[PUPPETEER] Failed for ${url}: ${err.message || err}`);
+    return { price: null, error: err.message || "unknown error" };
   }
 }
 
+
+// end of puppeteer price function 
 
 
 async function fetchTitleWithPuppeteer(url) {
@@ -618,7 +610,7 @@ app.put("/api/items/:id", (req, res) => {
 app.delete("/api/items/:id", (req, res) => {
   items = items.filter(i => i.id !== req.params.id);
   saveDb();
-  console.log("🗑️ Deleted item:", req.params.id);
+  console.log("Deleted item:", req.params.id);
   res.status(204).send();
 });
 
@@ -706,22 +698,36 @@ app.post("/api/items/:id/update", async (req, res) => {
         const scraperToUse = site.scraper || domainSetting.scraper || "auto";
         console.log(`[UPDATE ITEM] Using scraper: ${scraperToUse}, selector: ${selectorToUse || 'none'}`);
 
-        let price;
+        let result;
         if (scraperToUse === "simple") {
-          price = await fetchPriceSimple(site.url, selectorToUse);
+          result = await fetchPriceSimple(site.url, selectorToUse);
         } else {
-          price = await fetchPriceWithPuppeteer(site.url, selectorToUse);
+          result = await fetchPriceWithPuppeteer(site.url, selectorToUse);
         }
-        console.log(`[UPDATE ITEM] Got price: ${price != null ? '$' + price : 'null'}`);
+        console.log(`[UPDATE ITEM] Got result: ${result.price != null ? '$' + result.price : 'null'}, error: ${result.error || 'none'}`);
 
-        if (price != null) {
-          site.currentPrice = price;
+        if (result.price != null && !result.error && site.currentPrice != null) {
+          const oldPrice = site.currentPrice;
+          const changeRatio = Math.abs(result.price - oldPrice) / oldPrice;
+          if (changeRatio > 0.5) {
+            console.log(`[UPDATE ITEM] Big price change detected for ${site.url}: old $${oldPrice} new $${result.price}, treating as out of stock`);
+            result = { price: null, error: "out of stock" };
+          }
+        }
+
+        if (result.error === "out of stock") {
+          console.log(`[UPDATE ITEM] Out of stock for site ${site.url}, skipping update`);
+          continue;
+        }
+
+        if (result.price != null) {
+          site.currentPrice = result.price;
           site.lastUpdated = new Date().toISOString();
           site.history = site.history || [];
           site.historyDates = site.historyDates || [];
-          site.history.push(price);
+          site.history.push(result.price);
           site.historyDates.push(site.lastUpdated);
-          console.log(`[UPDATE ITEM] Updated price for site ${site.url} in item ${item.id}: $${price}`);
+          console.log(`[UPDATE ITEM] Updated price for site ${site.url} in item ${item.id}: $${result.price}`);
         } else {
           console.log(`[UPDATE ITEM] No price found for site ${site.url}`);
         }
@@ -770,22 +776,36 @@ app.post("/api/items/updateAll", async (req, res) => {
           const scraperToUse = site.scraper || domainSetting.scraper || "auto";
           console.log(`[UPDATE ALL] Using scraper: ${scraperToUse}, selector: ${selectorToUse || 'none'}`);
 
-          let price;
+          let result;
           if (scraperToUse === "simple") {
-            price = await fetchPriceSimple(site.url, selectorToUse);
+            result = await fetchPriceSimple(site.url, selectorToUse);
           } else {
-            price = await fetchPriceWithPuppeteer(site.url, selectorToUse);
+            result = await fetchPriceWithPuppeteer(site.url, selectorToUse);
           }
-          console.log(`[UPDATE ALL] Got price: ${price != null ? '$' + price : 'null'}`);
+          console.log(`[UPDATE ALL] Got result: ${result.price != null ? '$' + result.price : 'null'}, error: ${result.error || 'none'}`);
 
-          if (price != null) {
-            site.currentPrice = price;
+          if (result.price != null && !result.error && site.currentPrice != null) {
+            const oldPrice = site.currentPrice;
+            const changeRatio = Math.abs(result.price - oldPrice) / oldPrice;
+            if (changeRatio > 0.5) {
+              console.log(`[UPDATE ALL] Big price change detected for ${site.url}: old $${oldPrice} new $${result.price}, treating as out of stock`);
+              result = { price: null, error: "out of stock" };
+            }
+          }
+
+          if (result.error === "out of stock") {
+            console.log(`[UPDATE ALL] Out of stock for site ${site.url}, skipping update`);
+            continue;
+          }
+
+          if (result.price != null) {
+            site.currentPrice = result.price;
             site.lastUpdated = new Date().toISOString();
             site.history = site.history || [];
             site.historyDates = site.historyDates || [];
-            site.history.push(price);
+            site.history.push(result.price);
             site.historyDates.push(site.lastUpdated);
-            console.log(`[UPDATE ALL] Updated price for site ${site.url} in item ${item.id}: $${price}`);
+            console.log(`[UPDATE ALL] Updated price for site ${site.url} in item ${item.id}: $${result.price}`);
           } else {
             console.log(`[UPDATE ALL] No price found for site ${site.url}`);
           }
