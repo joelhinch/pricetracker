@@ -32,7 +32,7 @@ const GENERIC_PRICE_SELECTORS = [
 
 const OOS_KEYWORDS = [
   "out of stock",
-  "sold out",
+//  "sold out",
   "unavailable",
   "no longer available",
   "temporarily unavailable",
@@ -279,18 +279,283 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
         /'priceDisplay'\s*:\s*'?\\?\$?([\d.,]+)/gi
       ];
 
-      let totalMatches = 0;
+let jsonCandidates = [];
+let totalMatches = 0;
 
-      for (const pattern of pricePatterns) {
-        const matches = [...html.matchAll(pattern)];
-        totalMatches += matches.length;
+for (const pattern of pricePatterns) {
+  const matches = [...html.matchAll(pattern)];
+  totalMatches += matches.length;
 
-        for (const m of matches) {
-          let n = parseFloat(m[1].replace(/[^\d.]/g, ""));
-          if (!isNaN(n) && n > 9999) n = n / 100;
-          if (!isNaN(n) && n > 0 && n < 100000) candidates.push(n);
+  for (const m of matches) {
+    const raw = m[1];
+    const idx = m.index || 0; // character position of the match
+    let n = parseFloat(raw.replace(/[^\d.]/g, ""));
+    if (!isNaN(n) && n > 9999) n = n / 100;
+    if (!isNaN(n) && n > 0 && n < 100000) {
+      jsonCandidates.push({ price: n, index: idx });
+    }
+  }
+}
+
+if (totalMatches) console.log(`[PUPPETEER] Inline HTML JSON matches (nested supported): ${totalMatches}`);
+// ─────────────────────────────────────────────
+//  JSON-LD (structured data) price extraction — DOM + fallback
+// ─────────────────────────────────────────────
+try {
+  //  Make sure the JSON-LD has been rendered
+  try {
+    await page.waitForSelector('script[type="application/ld+json"]', { timeout: 15000 });
+  } catch {
+    console.warn("[PUPPETEER] JSON-LD tag not found before timeout, continuing anyway");
+  }
+
+  //  Grab all JSON-LD blocks from the live DOM
+  const ldBlocks = await page.$$eval('script[type="application/ld+json"]', els =>
+    els.map(e => e.textContent)
+  );
+
+  //  Fallback: also extract from raw HTML (covers SSR fragments)
+  if (!ldBlocks.length) {
+    console.log("[PUPPETEER] No LD+JSON via DOM, using regex fallback");
+    const matches = [...html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)];
+    ldBlocks.push(...matches.map(m => m[1]));
+  }
+
+  //  Parse and walk each block
+  for (const raw of ldBlocks) {
+    let text = raw
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .trim();
+
+    // sometimes multiple JSON objects are concatenated
+    const possibleChunks = text
+      .split(/}\s*{/)
+      .map((chunk, i, arr) =>
+        i === 0
+          ? chunk + (arr.length > 1 ? "}" : "")
+          : "{" + chunk + (i < arr.length - 1 ? "}" : "")
+      );
+
+    for (const chunk of possibleChunks) {
+      try {
+        const data = JSON.parse(chunk);
+
+        const walk = obj => {
+          if (!obj || typeof obj !== "object") return;
+          if (Array.isArray(obj)) return obj.forEach(walk);
+
+          if (obj.price && !isNaN(parseFloat(obj.price))) {
+            jsonCandidates.push({ price: parseFloat(obj.price), index: 0 });
+          }
+          if (obj.priceSpecification && obj.priceSpecification.price) {
+            const p = parseFloat(obj.priceSpecification.price);
+            if (!isNaN(p)) jsonCandidates.push({ price: p, index: 0 });
+          }
+          if (obj.offers && typeof obj.offers === "object") walk(obj.offers);
+          Object.values(obj).forEach(walk);
+        };
+
+        walk(data);
+      } catch {
+        /* ignore bad JSON blocks */
+      }
+    }
+  }
+
+  if (jsonCandidates.length) {
+    console.log(
+      `[PUPPETEER] Parsed ${ldBlocks.length} JSON-LD block(s); found ${jsonCandidates.length} price entries`
+    );
+  }
+} catch (e) {
+  console.warn(`[PUPPETEER] JSON-LD parse failed: ${e.message}`);
+}
+// ─────────────────────────────────────────────
+// 🧩 Visible DOM price fallback (robust) — supports Target.com.au
+// ─────────────────────────────────────────────
+try {
+  // Always run the visible DOM scan (even if not in settings.json)
+  console.log(`[PUPPETEER] Running visible DOM price fallback for ${domain}`);
+
+  // Wait until something that looks like a price appears in the rendered DOM
+  try {
+    await page.waitForFunction(
+      () => !![...document.querySelectorAll('*')].find(el =>
+        /\d+\.\d{2}/.test(el.textContent) || /\$\s?\d/.test(el.textContent)
+      ),
+      { timeout: 25000 }
+    );
+  } catch {
+    console.warn(`[PUPPETEER] No visible price text detected within timeout — continuing anyway`);
+  }
+
+  // Common price selectors (tuned for Target and similar sites)
+  const domSelectors = [
+    '[data-test*="price"]',
+    '.ProductPrice__price',
+    '.ProductPrice__styledPrice',
+    '.product-price',
+    '[class*="price"]'
+  ];
+
+  let priceTexts = [];
+
+  // 1️⃣ Try targeted selectors first
+  for (const sel of domSelectors) {
+    try {
+      const found = await page.$$eval(sel, els =>
+        els
+          .map(e => e.textContent.trim())
+          .filter(t => /\d/.test(t))
+      );
+      if (found.length) {
+        console.log(`[PUPPETEER] Found ${found.length} price elements for selector '${sel}'`);
+        priceTexts.push(...found);
+      }
+    } catch {}
+  }
+
+// 2️⃣ Fallback: full-page scan if targeted selectors fail
+if (!priceTexts.length) {
+  // Collect visible text nodes and reassemble split spans (e.g. Target)
+  priceTexts = await page.$$eval('*', els => {
+    return els
+      .filter(el => {
+        const tag = el.tagName.toLowerCase();
+        const visible = !!(el.offsetParent !== null);
+        return visible && tag !== 'script' && tag !== 'style';
+      })
+      .map(el => {
+        // Reassemble nested span fragments like "$" + "299"
+        const text = Array.from(el.querySelectorAll('span'))
+          .map(s => s.textContent.trim())
+          .filter(Boolean)
+          .join('') || el.textContent.trim();
+
+        return text;
+      })
+      .filter(t =>
+        /\$\s?\d/.test(t) ||                // $12, $ 12
+        /\d+\.\d{2}/.test(t) ||             // 12.99
+        /(?:aud|price|now|only)\s*\$?\s*\d+/i.test(t) // Price 59
+      )
+      .map(t => t.replace(/\s+/g, ' ').trim());
+  });
+}
+
+
+
+  // 3️⃣ Reassemble split price spans (Target pattern)
+  try {
+    const spanContainers = await page.$$('[data-test*="price"], [class*="Price"], [class*="price"]');
+    for (const el of spanContainers) {
+      const assembled = await el.evaluate(p =>
+        Array.from(p.querySelectorAll('span'))
+          .map(s => s.textContent.trim())
+          .filter(t => /[\d,$.,]/.test(t))
+          .join('')
+      );
+      if (assembled && /\d/.test(assembled)) {
+        const val = parseFloat(assembled.replace(/[^\d.]/g, ''));
+        if (!isNaN(val) && val > 0 && val < 100000) {
+          console.log(`[PUPPETEER] Reassembled price span detected: ${assembled} → ${val}`);
+          priceTexts.push(assembled);
         }
       }
+    }
+  } catch (e) {
+    console.warn(`[PUPPETEER] Reassembly scan failed: ${e.message}`);
+  }
+
+  // 4️⃣ Normalize and extract numeric values
+const numericPrices = priceTexts
+  .map(t => parseFloat(t.replace(/[^0-9.]/g, '')))
+  .filter(v =>
+    v && v > 0 && v < 100000 && /^\d{1,4}(\.\d{1,2})?$/.test(v.toString())
+  );
+
+
+  if (numericPrices.length) {
+    console.log(`[PUPPETEER] Visible DOM price candidates: ${numericPrices.join(", ")}`);
+    candidates.push(...numericPrices);
+  } else {
+    console.log(`[PUPPETEER] No visible DOM price text found for ${domain}`);
+  }
+
+} catch (e) {
+  console.warn(`[PUPPETEER] Visible DOM scan failed: ${e.message}`);
+}
+
+
+
+// ─────────────────────────────────────────────
+// 🧠 NEW SMART JSON PRICE SELECTION LOGIC
+// ─────────────────────────────────────────────
+if (jsonCandidates.length) {
+  console.log(`[PUPPETEER] Inline HTML JSON matches (with positions): ${jsonCandidates.length}`);
+
+  // Sort by order of appearance in the HTML
+  jsonCandidates.sort((a, b) => a.index - b.index);
+  console.log(`[PUPPETEER] JSON price order by position:`, jsonCandidates.slice(0, 10));
+
+  // 🧹 1. Normalize prices (handle cents scaling like 5500 → 55)
+  for (const c of jsonCandidates) {
+    let n = c.price;
+    if (n > 9999) n = n / 100;
+    n = Math.round((n + Number.EPSILON) * 100) / 100;
+    c.price = n;
+  }
+
+  // 🧠 2. Group near-duplicates (e.g. 55 and 54.99)
+  const clustered = [];
+  const EPS = 0.05; // ±5 cents tolerance
+  for (const c of jsonCandidates) {
+    const existing = clustered.find(g => Math.abs(g.price - c.price) < EPS);
+    if (existing) {
+      existing.count++;
+      existing.indices.push(c.index);
+    } else {
+      clustered.push({ price: c.price, count: 1, indices: [c.index] });
+    }
+  }
+
+  // 🏆 3. Sort by first appearance in the document
+  clustered.sort((a, b) => a.indices[0] - b.indices[0]);
+
+  // Find the most frequent price(s)
+  const maxCount = Math.max(...clustered.map(c => c.count));
+  const mostFrequent = clustered.filter(c => c.count === maxCount);
+
+  // 🧩 4. Choose preferred candidate
+  let mainLikelyPrice = null;
+  if (mostFrequent.length === 1) {
+    mainLikelyPrice = mostFrequent[0].price;
+  } else {
+    mainLikelyPrice = mostFrequent[0].price; // earliest among ties
+  }
+
+  // 🥇 5. Overwhelming dominance rule (3× more frequent)
+  const sortedCounts = [...clustered].sort((a, b) => b.count - a.count);
+  if (sortedCounts.length > 1 && sortedCounts[0].count >= sortedCounts[1].count * 3) {
+    mainLikelyPrice = sortedCounts[0].price;
+    console.log(`[PUPPETEER] Overwhelming repetition detected (${sortedCounts[0].count}× vs ${sortedCounts[1].count}×)`);
+  }
+
+  console.log(`[PUPPETEER] JSON positional preferred price: $${mainLikelyPrice}`);
+  candidates.push(mainLikelyPrice);
+}
+// ─────────────────────────────────────────────
+// END NEW SMART JSON PRICE SELECTION LOGIC
+// ─────────────────────────────────────────────
+
+
+
+// merge into your existing candidates array for unified selection later
+for (const c of jsonCandidates) candidates.push(c.price);
+
 
       const deepMatches = [
         ...html.matchAll(/"price"\s*"\s*[{:,"']+[^}{"']*?([\d.]+)[^}]*?}/gi),
