@@ -38,7 +38,7 @@
     .btn-primary{background:linear-gradient(90deg,var(--accent-teal),#10b981);color:white;}
     .btn-outline{background:white;border:1px solid #dce3eb;color:var(--accent-indigo);}
     .btn-danger{background:#ef4444;color:white;}
-    main{padding-top:164px;max-width:1100px;margin:0 auto;}
+    main{padding-top:164px;padding-bottom:220px;max-width:1100px;margin:0 auto;}
     .add-bar{
       position:fixed;top:56px;left:0;right:0;background:white;
       box-shadow:0 2px 6px rgba(0,0,0,0.04);
@@ -60,7 +60,7 @@
       align-items:flex-start;
     }
     .product-img{
-      width:120px;height:120px;object-fit:cover;
+      width:120px;height:120px;object-fit:contain;
       border-radius:var(--radius);
       background:#f0f2f5;
       flex-shrink:0;
@@ -75,7 +75,8 @@
     canvas{max-width:100%;height:180px;}
     .pos-input{width:72px;padding:6px;border-radius:6px;border:1px solid #e6eef3;font-size:.9rem;}
     .compact-btn{padding:6px 8px;border-radius:6px;border:1px solid rgba(12,18,30,0.04);background:white;cursor:pointer;font-weight:700;}
-    #log-container{position:fixed;bottom:0;left:0;right:0;background:white;padding:10px;max-height:200px;overflow-y:auto;border-top:1px solid var(--divider);display:none;}
+    #log-container{position:fixed;bottom:0;left:0;right:0;background:white;padding:10px;height:200px;overflow:hidden;border-top:2px solid var(--divider);display:none;z-index:950;box-shadow:0 -2px 10px rgba(0,0,0,0.1);}
+    #logs{height:100%;overflow-y:auto;}
     
     .new-low-badge{
       display:inline-block;
@@ -644,11 +645,19 @@
         const res = await fetch('/api/logs');
         const data = await res.json();
         const logsDiv = $('#logs');
+        
+        // Check if user has manually scrolled up
+        const isScrolledToBottom = logsDiv.scrollHeight - logsDiv.clientHeight <= logsDiv.scrollTop + 1;
+        
         if (data.logs && Array.isArray(data.logs)) {
           logsDiv.innerHTML = data.logs.map(log => 
-            `<div class="muted" style="font-size:0.85rem;">${escapeHtml(log)}</div>`
+            `<div class="muted" style="font-size:0.85rem;margin-bottom:2px;font-family:monospace;">${escapeHtml(log)}</div>`
           ).join('');
-          logsDiv.scrollTop = logsDiv.scrollHeight;
+          
+          // Auto-scroll to bottom only if already at bottom (or first load)
+          if (isScrolledToBottom || !logsDiv.scrollTop) {
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+          }
         }
       } catch (e) {
         console.error('Failed to fetch server logs:', e);
