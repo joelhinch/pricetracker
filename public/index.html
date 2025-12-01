@@ -38,13 +38,18 @@
     .btn-primary{background:linear-gradient(90deg,var(--accent-teal),#10b981);color:white;}
     .btn-outline{background:white;border:1px solid #dce3eb;color:var(--accent-indigo);}
     .btn-danger{background:#ef4444;color:white;}
-    main{padding-top:120px;max-width:1100px;margin:0 auto;}
+    main{padding-top:164px;max-width:1100px;margin:0 auto;}
     .add-bar{
       position:fixed;top:56px;left:0;right:0;background:white;
       box-shadow:0 2px 6px rgba(0,0,0,0.04);
       padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:900;
     }
-    .add-bar input[type=text]{flex:1;padding:6px 8px;border-radius:8px;border:1px solid #e0e7ef;font-size:.9rem;}
+    .filter-bar{
+      position:fixed;top:104px;left:0;right:0;background:#f0f4f8;
+      box-shadow:0 2px 6px rgba(0,0,0,0.04);
+      padding:8px 16px;display:flex;gap:8px;align-items:center;z-index:899;
+    }
+    .add-bar input[type=text],.filter-bar input[type=text]{flex:1;padding:6px 8px;border-radius:8px;border:1px solid #e0e7ef;font-size:.9rem;}
     .product-card{
       background:var(--card);
       box-shadow:var(--flat-shadow);
@@ -71,6 +76,44 @@
     .pos-input{width:72px;padding:6px;border-radius:6px;border:1px solid #e6eef3;font-size:.9rem;}
     .compact-btn{padding:6px 8px;border-radius:6px;border:1px solid rgba(12,18,30,0.04);background:white;cursor:pointer;font-weight:700;}
     #log-container{position:fixed;bottom:0;left:0;right:0;background:white;padding:10px;max-height:200px;overflow-y:auto;border-top:1px solid var(--divider);display:none;}
+    
+    .new-low-badge{
+      display:inline-block;
+      background:linear-gradient(135deg,#10b981,#059669);
+      color:white;
+      padding:4px 10px;
+      border-radius:16px;
+      font-weight:700;
+      font-size:0.8rem;
+      box-shadow:0 3px 10px rgba(16,185,129,0.3);
+      animation:pulse 2s ease-in-out infinite;
+      margin-left:8px;
+      vertical-align:middle;
+    }
+    
+    @keyframes pulse{
+      0%,100%{transform:scale(1);}
+      50%{transform:scale(1.05);}
+    }
+    
+    .discount-badge{
+      display:inline-block;
+      padding:4px 8px;
+      border-radius:6px;
+      font-weight:700;
+      font-size:0.85rem;
+      margin-left:8px;
+    }
+    
+    .discount-positive{
+      background:#dcfce7;
+      color:#166534;
+    }
+    
+    .discount-negative{
+      background:#fee2e2;
+      color:#991b1b;
+    }
   </style>
 </head>
 <body>
@@ -89,6 +132,12 @@
     <button id="addBtn" class="btn btn-primary">Add</button>
   </div>
 
+  <div class="filter-bar">
+    <label style="font-weight:600;white-space:nowrap;">Filter by domain:</label>
+    <input id="domainFilter" type="text" placeholder="e.g., amazon, ebay (leave empty to show all)" />
+    <button id="clearFilterBtn" class="btn btn-outline">Clear</button>
+  </div>
+
   <main id="productList"></main>
 
   <div id="log-container">
@@ -100,6 +149,7 @@
     const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
     const list=$('#productList');
     let products=[];
+    let currentDomainFilter = '';
 
     function log(msg) {
       const logs = $('#logs');
@@ -120,9 +170,61 @@
     function truncate(s,n=80){ return s && s.length>n ? s.slice(0,n)+'…' : s; }
     function formatPrice(v){ return v==null ? '—' : '$'+Number(v).toFixed(2); }
 
+    function isNewLow(p) {
+      // Only show "new low" if:
+      // 1. There's a current price
+      // 2. There's historical data (more than 1 price point)
+      // 3. Current price equals min price
+      // 4. This is genuinely the lowest (not just initial entry)
+      if (!p.currentPrice || !p.minPrice) return false;
+      
+      const allPrices = p.sites.flatMap(s => (s.history || [])).filter(Boolean);
+      if (allPrices.length <= 1) return false; // Only 1 data point means it's brand new
+      
+      // Also check that min and max are different (proves there's price variation)
+      if (p.minPrice === p.maxPrice) return false;
+      
+      return Math.abs(p.currentPrice - p.minPrice) < 0.01;
+    }
+
+    function calculateDiscount(current, reference, isVsHigh) {
+      if (current == null || reference == null) return null;
+      
+      // Don't show discount if they're the same (no price history variation)
+      if (Math.abs(current - reference) < 0.01) return null;
+      
+      const diff = current - reference;
+      const percent = (diff / reference) * 100;
+      return {
+        percent: Math.abs(percent).toFixed(1),
+        isDiscount: isVsHigh ? diff < 0 : diff > 0,
+        raw: percent
+      };
+    }
+
+    function matchesDomainFilter(p) {
+      if (!currentDomainFilter) return true;
+      const filter = currentDomainFilter.toLowerCase().trim();
+      return (p.sites || []).some(s => {
+        try {
+          const hostname = new URL(s.url).hostname.toLowerCase();
+          return hostname.includes(filter);
+        } catch {
+          return false;
+        }
+      });
+    }
+
     function renderProducts(){
       list.innerHTML='';
-      for(const p of products){
+      const filtered = products.filter(matchesDomainFilter);
+      
+      if (filtered.length === 0 && currentDomainFilter) {
+        list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted);">No products match the domain filter "' + escapeHtml(currentDomainFilter) + '"</div>';
+        return;
+      }
+      
+      for(const p of filtered){
         const card=document.createElement('div');
         card.className='product-card';
         card.dataset.id=p.id;
@@ -144,7 +246,22 @@
 
         const meta=document.createElement('div');
         meta.className='muted';
-        meta.textContent=p.lastUpdated?new Date(p.lastUpdated).toLocaleString():'';
+        meta.style.display='flex';
+        meta.style.alignItems='center';
+        meta.style.gap='6px';
+        meta.style.flexWrap='wrap';
+        
+        const timestamp = document.createElement('span');
+        timestamp.textContent = p.lastUpdated ? new Date(p.lastUpdated).toLocaleString() : '';
+        meta.appendChild(timestamp);
+
+        // Add "NEW LOW" badge next to timestamp if applicable
+        if (isNewLow(p)) {
+          const badge = document.createElement('span');
+          badge.className = 'new-low-badge';
+          badge.textContent = '🎉 NEW LOW!';
+          meta.appendChild(badge);
+        }
 
         header.append(title, meta);
 
@@ -153,67 +270,80 @@
         priceRow.style.flexWrap='wrap';
         priceRow.style.justifyContent='space-between';
         priceRow.style.alignItems='flex-start';
-        priceRow.style.gap='12px';
-        priceRow.style.marginTop='8px';
+        priceRow.style.gap='16px';
+        priceRow.style.marginTop='12px';
 
         const bestBox=document.createElement('div');
-        bestBox.style.flex='1 1 200px';
+        bestBox.style.flex='1 1 240px';
         bestBox.innerHTML=`<div class="muted">Best link</div><div style="margin-top:6px">${p.bestUrl ? '<a href="'+escapeHtml(p.bestUrl)+'" target="_blank">'+escapeHtml(truncate(p.bestUrl,60))+'</a>' : '<span class="muted">no links</span>'}</div>`;
 
-// --- Current Low box ---
-const currLowBox = document.createElement('div');
-currLowBox.style.textAlign = 'right';
+        const currLowBox = document.createElement('div');
+        currLowBox.style.textAlign = 'right';
+        currLowBox.style.minWidth = '120px';
 
-let currColor = 'var(--accent-teal)'; // default (good / equal)
-if (p.currentPrice != null && p.minPrice != null) {
-  if (p.currentPrice > p.minPrice) currColor = '#ef4444'; // red if higher than historical low
-}
+        let currColor = 'var(--accent-teal)';
+        if (p.currentPrice != null && p.minPrice != null) {
+          if (p.currentPrice > p.minPrice) currColor = '#ef4444';
+        }
 
-currLowBox.innerHTML = `
-  <div class="muted">Current Low</div>
-  <div class="price" style="margin-top:6px; color:${currColor};">
-    ${formatPrice(p.currentPrice)}
-  </div>`;
+        // Calculate discount vs historical low
+        const vsLow = calculateDiscount(p.currentPrice, p.minPrice, false);
+        let vsLowBadge = '';
+        if (vsLow && vsLow.raw !== 0) {
+          vsLowBadge = `<div class="discount-badge ${vsLow.isDiscount ? 'discount-negative' : 'discount-positive'}" style="margin-top:4px;display:inline-block;">${vsLow.isDiscount ? '+' : ''}${vsLow.percent}%</div>`;
+        }
 
-// --- Historical Low box ---
-const histLowBox = document.createElement('div');
-histLowBox.style.textAlign = 'right';
-histLowBox.innerHTML = `
-  <div class="muted">Hist Low</div>
-  <div class="price" style="margin-top:6px; color:var(--accent-indigo);">
-    ${formatPrice(p.minPrice)}
-  </div>`;
+        currLowBox.innerHTML = `
+          <div class="muted">Current Low</div>
+          <div class="price" style="margin-top:6px; color:${currColor};">
+            ${formatPrice(p.currentPrice)}
+          </div>${vsLowBadge}`;
 
-// --- Historical High box ---
-const histHighBox = document.createElement('div');
-histHighBox.style.textAlign = 'right';
-histHighBox.innerHTML = `
-  <div class="muted">Hist High</div>
-  <div class="price" style="margin-top:6px; color:var(--accent-indigo);">
-    ${formatPrice(p.maxPrice)}
-  </div>`;
+        const histLowBox = document.createElement('div');
+        histLowBox.style.textAlign = 'right';
+        histLowBox.style.minWidth = '100px';
+        histLowBox.innerHTML = `
+          <div class="muted">Hist Low</div>
+          <div class="price" style="margin-top:6px; color:var(--accent-indigo);">
+            ${formatPrice(p.minPrice)}
+          </div>`;
+
+        const histHighBox = document.createElement('div');
+        histHighBox.style.textAlign = 'right';
+        histHighBox.style.minWidth = '120px';
+
+        // Calculate discount vs historical high
+        const vsHigh = calculateDiscount(p.currentPrice, p.maxPrice, true);
+        let vsHighBadge = '';
+        if (vsHigh && vsHigh.raw !== 0) {
+          vsHighBadge = `<div class="discount-badge ${vsHigh.isDiscount ? 'discount-positive' : 'discount-negative'}" style="margin-top:4px;display:inline-block;">${vsHigh.isDiscount ? '-' : '+'}${vsHigh.percent}%</div>`;
+        }
+
+        histHighBox.innerHTML = `
+          <div class="muted">Hist High</div>
+          <div class="price" style="margin-top:6px; color:var(--accent-indigo);">
+            ${formatPrice(p.maxPrice)}
+          </div>${vsHighBadge}`;
 
         priceRow.append(bestBox, currLowBox, histLowBox, histHighBox);
 
         const actions=document.createElement('div');
         actions.className='actions';
 
-actions.innerHTML = `
-  <input class="pos-input" type="number"
-    value="${typeof p.position === 'number' ? p.position : 0}"
-    style="display:none;" />
-  <button class="compact-btn update-btn">Update</button>
-  <button class="compact-btn save-btn">Save</button>
-  <button class="compact-btn chart-btn">Show Chart</button>
-  <button class="compact-btn links-btn">Show Links</button>
-  <button class="compact-btn delete-btn"
-    style="background:#ef4444;color:white;border:none;">🗑️ Delete</button>
-  <button class="compact-btn up-btn">↑</button>
-  <button class="compact-btn down-btn">↓</button>
-  <button class="compact-btn move-top-btn">⤴️ Move to Top</button>
-`;
-
-
+        actions.innerHTML = `
+          <input class="pos-input" type="number"
+            value="${typeof p.position === 'number' ? p.position : 0}"
+            style="display:none;" />
+          <button class="compact-btn update-btn">Update</button>
+          <button class="compact-btn save-btn">Save</button>
+          <button class="compact-btn chart-btn">Show Chart</button>
+          <button class="compact-btn links-btn">Show Links</button>
+          <button class="compact-btn delete-btn"
+            style="background:#ef4444;color:white;border:none;">🗑️ Delete</button>
+          <button class="compact-btn up-btn">↑</button>
+          <button class="compact-btn down-btn">↓</button>
+          <button class="compact-btn move-top-btn">⤴️ Move to Top</button>
+        `;
 
         const linksContainer=document.createElement('div');
         linksContainer.className='links-container';
@@ -283,12 +413,26 @@ actions.innerHTML = `
 
       if (btn.classList.contains('chart-btn')) {
         const c = card.querySelector('.chart-container');
-        if (c.style.display === 'none') { c.style.display = 'block'; renderChart(card, product); btn.textContent='Hide Chart'; } else { c.style.display = 'none'; btn.textContent='Show Chart'; }
+        if (c.style.display === 'none') { 
+          c.style.display = 'block'; 
+          renderChart(card, product); 
+          btn.textContent='Hide Chart'; 
+        } else { 
+          c.style.display = 'none'; 
+          btn.textContent='Show Chart'; 
+        }
       }
 
       if (btn.classList.contains('links-btn')) {
         const c = card.querySelector('.links-container');
-        if (c.style.display === 'none') { c.style.display = 'block'; btn.textContent='Hide Links'; const img = card.querySelector('.product-img'); img.style.display = (product.imageUrl) ? 'block' : 'none'; } else { c.style.display = 'none'; btn.textContent='Show Links'; const img = card.querySelector('.product-img'); img.style.display = 'none'; }
+        const img = card.querySelector('.product-img');
+        if (c.style.display === 'none') { 
+          c.style.display = 'block'; 
+          btn.textContent='Hide Links'; 
+        } else { 
+          c.style.display = 'none'; 
+          btn.textContent='Show Links';
+        }
       }
 
       if (btn.classList.contains('delete-btn')) {
@@ -330,11 +474,11 @@ actions.innerHTML = `
         }
       }
 
-if (btn.classList.contains('up-btn') || btn.classList.contains('down-btn') || btn.classList.contains('move-top-btn')) {
-  let direction;
-  if (btn.classList.contains('up-btn')) direction = 'up';
-  else if (btn.classList.contains('down-btn')) direction = 'down';
-  else direction = 'top';
+      if (btn.classList.contains('up-btn') || btn.classList.contains('down-btn') || btn.classList.contains('move-top-btn')) {
+        let direction;
+        if (btn.classList.contains('up-btn')) direction = 'up';
+        else if (btn.classList.contains('down-btn')) direction = 'down';
+        else direction = 'top';
 
         try {
           await fetch('/api/items/reorder', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id, direction }) });
@@ -361,28 +505,27 @@ if (btn.classList.contains('up-btn') || btn.classList.contains('down-btn') || bt
       const canvas = card.querySelector('canvas');
       const ctx = canvas.getContext('2d');
       const labels = (product.historyDates || []).map(d => new Date(d).toLocaleDateString());
-// Define a palette of distinct colors for each site
-const COLORS = [
-  '#4CAF50', '#2196F3', '#FF9800', '#E91E63', '#9C27B0',
-  '#00BCD4', '#FFC107', '#F44336', '#3F51B5', '#8BC34A',
-];
+      const COLORS = [
+        '#4CAF50', '#2196F3', '#FF9800', '#E91E63', '#9C27B0',
+        '#00BCD4', '#FFC107', '#F44336', '#3F51B5', '#8BC34A',
+      ];
 
-let datasets = (product.sites || []).map((site, i) => {
-  const offset = (product.historyDates || []).length - (site.history || []).length;
-  return {
-    label: (new URL(site.url).hostname.replace(/^www\./,'')),
-    fullUrl: site.url,
-    data: (product.historyDates || []).map((_, i2) => {
-      const siteIndex = i2 - offset;
-      return siteIndex >= 0 && siteIndex < (site.history || []).length ? site.history[siteIndex] : null;
-    }),
-    borderColor: COLORS[i % COLORS.length],
-    backgroundColor: COLORS[i % COLORS.length] + '33',
-    tension: 0.25,
-    spanGaps: true,
-    pointRadius: 3,
-  };
-});
+      let datasets = (product.sites || []).map((site, i) => {
+        const offset = (product.historyDates || []).length - (site.history || []).length;
+        return {
+          label: (new URL(site.url).hostname.replace(/^www\./,'')),
+          fullUrl: site.url,
+          data: (product.historyDates || []).map((_, i2) => {
+            const siteIndex = i2 - offset;
+            return siteIndex >= 0 && siteIndex < (site.history || []).length ? site.history[siteIndex] : null;
+          }),
+          borderColor: COLORS[i % COLORS.length],
+          backgroundColor: COLORS[i % COLORS.length] + '33',
+          tension: 0.25,
+          spanGaps: true,
+          pointRadius: 3,
+        };
+      });
 
       if (!(labels.length && datasets.length)) return;
 
@@ -452,35 +595,78 @@ let datasets = (product.sites || []).map((site, i) => {
       }
     });
 
-const updateAllBtn = document.getElementById('updateAllBtn');
+    const updateAllBtn = document.getElementById('updateAllBtn');
 
-updateAllBtn.addEventListener('click', async ()=>{
-  updateAllBtn.disabled = true;
-  const originalText = updateAllBtn.textContent;
-  updateAllBtn.textContent = "Updating All...";
-  updateAllBtn.style.opacity = 0.6;
-  updateAllBtn.style.cursor = "not-allowed";
+    updateAllBtn.addEventListener('click', async ()=>{
+      updateAllBtn.disabled = true;
+      const originalText = updateAllBtn.textContent;
+      updateAllBtn.textContent = "Updating All...";
+      updateAllBtn.style.opacity = 0.6;
+      updateAllBtn.style.cursor = "not-allowed";
 
-  try {
-    await fetch('/api/items/updateAll', { method:'POST' });
-    log('Updated all products');
-    await loadProducts();
-  } catch (e) {
-    log(`Failed to update all: ${e.message}`);
-  } finally {
-    updateAllBtn.disabled = false;
-    updateAllBtn.textContent = originalText;
-    updateAllBtn.style.opacity = 1;
-    updateAllBtn.style.cursor = "pointer";
-  }
-});
-
+      try {
+        await fetch('/api/items/updateAll', { method:'POST' });
+        log('Updated all products');
+        await loadProducts();
+      } catch (e) {
+        log(`Failed to update all: ${e.message}`);
+      } finally {
+        updateAllBtn.disabled = false;
+        updateAllBtn.textContent = originalText;
+        updateAllBtn.style.opacity = 1;
+        updateAllBtn.style.cursor = "pointer";
+      }
+    });
 
     document.getElementById('settingsBtn').addEventListener('click', ()=> window.location.href='./settings.html');
 
-    document.getElementById('logsBtn').addEventListener('click', ()=>{
+    document.getElementById('logsBtn').addEventListener('click', async ()=>{
       const cont = $('#log-container');
-      cont.style.display = cont.style.display === 'none' ? 'block' : 'none';
+      if (cont.style.display === 'none') {
+        cont.style.display = 'block';
+        // Fetch server logs when opening
+        await fetchServerLogs();
+        // Auto-refresh logs every 2 seconds while open
+        if (window.logRefreshInterval) clearInterval(window.logRefreshInterval);
+        window.logRefreshInterval = setInterval(fetchServerLogs, 2000);
+      } else {
+        cont.style.display = 'none';
+        // Stop auto-refresh when closed
+        if (window.logRefreshInterval) {
+          clearInterval(window.logRefreshInterval);
+          window.logRefreshInterval = null;
+        }
+      }
+    });
+
+    async function fetchServerLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        const data = await res.json();
+        const logsDiv = $('#logs');
+        if (data.logs && Array.isArray(data.logs)) {
+          logsDiv.innerHTML = data.logs.map(log => 
+            `<div class="muted" style="font-size:0.85rem;">${escapeHtml(log)}</div>`
+          ).join('');
+          logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+      } catch (e) {
+        console.error('Failed to fetch server logs:', e);
+      }
+    }
+
+    // Domain filter functionality
+    const domainFilterInput = document.getElementById('domainFilter');
+    
+    domainFilterInput.addEventListener('input', (e) => {
+      currentDomainFilter = e.target.value;
+      renderProducts();
+    });
+
+    document.getElementById('clearFilterBtn').addEventListener('click', () => {
+      domainFilterInput.value = '';
+      currentDomainFilter = '';
+      renderProducts();
     });
 
     // initial load
