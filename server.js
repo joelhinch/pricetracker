@@ -195,17 +195,22 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
   const domain = new URL(url).hostname.replace(/^www\./, "");
 
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-      ],
-      defaultViewport: { width: 1280, height: 800 }
-    });
+browser = await puppeteer.launch({
+  headless: true,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    "--window-size=1366,768",
+    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" +
+      (110 + Math.floor(Math.random() * 10)) + ".0.0.0 Safari/537.36"
+  ],
+  defaultViewport: { width: 1366, height: 768 }
+});
+
 
     const page = await browser.newPage();
 
@@ -252,20 +257,64 @@ async function fetchPriceWithPuppeteer(url, customSelector = null) {
         // swallow
       }
     });
+    
+    // ─────────────────────────────────────────────
+// Scale Normalisation Utility (prevents inflated prices like 4900 → 49.00)
+// ─────────────────────────────────────────────
+function normaliseCandidateValues(values) {
+  if (!Array.isArray(values)) return values;
+
+  // Detect if most values are within normal retail range (e.g., 1–5000)
+  const median = values.slice().sort((a, b) => a - b)[Math.floor(values.length / 2)] || 0;
+
+  return values.map(v => {
+    // Convert prices like 4900 → 49 if they’re outliers compared to the median
+    if (v > 500 && v.toString().endsWith("00") && median < 500) return v / 100;
+    if (v > 1000 && v % 100 === 0 && median < 1000) return v / 100;
+    if (v > 1000 && values.some(x => x < 100)) return v / 100;
+    return v;
+  });
+}
+
+// We'll apply this later just before final price selection too
+
 
     try {
       await page.goto(url, { waitUntil: "domcontentloaded" });
+      await new Promise(r => setTimeout(r, 2000 + Math.random() * 1500));
+
     } catch (e) {
       console.warn(`[PUPPETEER] Navigation warning for ${url}: ${e.message || e}`);
     }
     await new Promise(r => setTimeout(r, 2500));
+    
+    //debug2
+    // ─────────────────────────────────────────────
+// DEBUG: Preview what HTML Puppeteer actually got (first 500 chars)
+// ─────────────────────────────────────────────
+try {
+  const snippet = await page.evaluate(() => document.body.innerText.slice(0, 500));
+  console.log("[PUPPETEER][DEBUG] Page text preview:", snippet);
+  if (/Reference\s+#\d+\./i.test(snippet) || /edgesuite\.net/i.test(snippet)) {
+    console.warn("[PUPPETEER][DEBUG] ⚠️ Detected Akamai error page instead of real product page");
+  }
+} catch (e) {
+  console.warn("[PUPPETEER][DEBUG] Could not preview page text:", e.message);
+}
 
-    const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase() || '');
-    if (OOS_KEYWORDS.some(kw => bodyText.includes(kw))) {
-      console.log(`[PUPPETEER] Out of stock detected`);
-      await browser.close().catch(() => {});
-      return { price: null, error: "out of stock" };
-    }
+    //debug2
+
+// Delay out-of-stock detection until after price evaluation
+let outOfStockDetected = false;
+try {
+  const bodyText = await page.evaluate(() => document.body.innerText.toLowerCase() || '');
+  if (OOS_KEYWORDS.some(kw => bodyText.includes(kw))) {
+    outOfStockDetected = true;
+  }
+} catch (e) {
+  console.warn(`[PUPPETEER] OOS keyword check failed: ${e.message}`);
+}
+
 
     try {
       const html = await page.content();
@@ -374,125 +423,325 @@ try {
   console.warn(`[PUPPETEER] JSON-LD parse failed: ${e.message}`);
 }
 // ─────────────────────────────────────────────
-// 🧩 Visible DOM price fallback (robust) — supports Target.com.au
+// Conditional visible DOM price fallback — only for domains in settings.json
 // ─────────────────────────────────────────────
 try {
-  // Always run the visible DOM scan (even if not in settings.json)
-  console.log(`[PUPPETEER] Running visible DOM price fallback for ${domain}`);
+  if (!settings || !Array.isArray(settings)) {
+    console.log(`[PUPPETEER] No settings loaded, skipping visible DOM scan for ${domain}`);
+  } else {
+    const domainAllowed = settings.some(s => s.domain && domain.includes(s.domain));
+    if (!domainAllowed) {
+      console.log(`[PUPPETEER] Skipping visible DOM scan — ${domain} not in settings.json`);
+    } else {
+      console.log(`[PUPPETEER] Running visible DOM price fallback for ${domain}`);
 
-  // Wait until something that looks like a price appears in the rendered DOM
-  try {
-    await page.waitForFunction(
-      () => !![...document.querySelectorAll('*')].find(el =>
-        /\d+\.\d{2}/.test(el.textContent) || /\$\s?\d/.test(el.textContent)
-      ),
-      { timeout: 25000 }
-    );
-  } catch {
-    console.warn(`[PUPPETEER] No visible price text detected within timeout — continuing anyway`);
-  }
-
-  // Common price selectors (tuned for Target and similar sites)
-  const domSelectors = [
-    '[data-test*="price"]',
-    '.ProductPrice__price',
-    '.ProductPrice__styledPrice',
-    '.product-price',
-    '[class*="price"]'
-  ];
-
-  let priceTexts = [];
-
-  // 1️⃣ Try targeted selectors first
-  for (const sel of domSelectors) {
-    try {
-      const found = await page.$$eval(sel, els =>
-        els
-          .map(e => e.textContent.trim())
-          .filter(t => /\d/.test(t))
-      );
-      if (found.length) {
-        console.log(`[PUPPETEER] Found ${found.length} price elements for selector '${sel}'`);
-        priceTexts.push(...found);
+      try {
+        await page.waitForFunction(
+          () => !![...document.querySelectorAll('*')].find(el =>
+            /\$\s?\d/.test(el.textContent) || /\d+\.\d{2}/.test(el.textContent)
+          ),
+          { timeout: 10000 }
+        );
+      } catch {
+        console.warn(`[PUPPETEER] No visible price text detected within timeout — continuing anyway`);
       }
-    } catch {}
+
+const domSelectors = [
+  '[data-test*="price"]',
+  '[data-test*="ProductPrice"]',
+  '[data-test="product-price"]',
+  '[data-test="price-container"]',
+  '.ProductPrice__price',
+  '.ProductPrice__styledPrice',
+  '.product-price',
+  '[class*="price"]',
+  '[class*="Price"]',
+  'div[data-testid*="price"]',
+  'div[data-component*="Price"]',
+  'div[data-test*="ProductDetails"] span',
+  'div[data-test*="ProductDetails"] strong',
+];
+
+
+      // Locate "Add to cart" or similar for proximity weighting
+      const anchorRect = await page.evaluate(() => {
+        const anchor =
+          document.querySelector('[data-test*="add-to-cart"]') ||
+          document.querySelector('button[data-test*="add-to-cart"]') ||
+          document.querySelector('button#add-to-cart') ||
+          document.querySelector('button.add-to-cart') ||
+          document.querySelector('button[type="submit"]') ||
+          document.querySelector('[aria-label*="Add to cart"]') ||
+          Array.from(document.querySelectorAll('button')).find(b => /add to cart|buy now|add to bag/i.test(b.textContent));
+        if (!anchor) return null;
+        const r = anchor.getBoundingClientRect();
+        return { top: r.top, height: r.height };
+      });
+
+      // Gather visible elements matching likely price classes
+      const elems = await page.$$eval(domSelectors.join(','), els =>
+        els
+          .filter(el => el.offsetParent !== null)
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            return {
+              text: el.textContent.trim().replace(/\s+/g, ' '),
+              top: Math.round(r.top),
+              h: Math.round(r.height)
+            };
+          })
+      ).catch(() => []);
+
+      // Merge with span/strong/b reassembled fragments (for split prices)
+      const spanElems = await page.$$eval('[data-test*="price"], [class*="Price"], [class*="price"]', els =>
+        els
+          .filter(el => el.offsetParent !== null)
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            const assembled = Array.from(el.querySelectorAll('span, strong, b'))
+              .map(s => s.textContent.trim())
+              .filter(Boolean)
+              .join('');
+            const text = (assembled || el.textContent || '').trim().replace(/\s+/g, ' ');
+            return { text, top: Math.round(r.top), h: Math.round(r.height) };
+          })
+      ).catch(() => []);
+
+let priceElements = [...elems, ...spanElems];
+
+// Deep scan for complex React or split span prices (universal)
+if (priceElements.length < 3) {
+  try {
+    const deepElems = await page.$$eval(
+      'div[data-test*="product"], div[data-test*="details"], div[data-component*="Price"], section, article',
+      els =>
+        els
+          .filter(el => el.offsetParent !== null)
+          .flatMap(el => {
+            const r = el.getBoundingClientRect();
+
+            // Reassemble nested spans or fragments into one text string
+            const assembled = Array.from(el.querySelectorAll('span, strong, b'))
+              .map(s => s.textContent.trim())
+              .filter(Boolean)
+              .join('');
+
+            const fullText = (assembled || el.textContent || '').trim().replace(/\s+/g, ' ');
+            return [{ text: fullText, top: Math.round(r.top), h: Math.round(r.height) }];
+          })
+          .filter(e =>
+            /\$\s?\d/.test(e.text) ||
+            /\d+\.\d{2}/.test(e.text) ||
+            /(?:aud|price|now|only)\s*\$?\s*\d+/i.test(e.text)
+          )
+    );
+    if (deepElems.length) {
+      console.log(`[PUPPETEER] Deep scan added ${deepElems.length} reassembled price candidates`);
+      priceElements.push(...deepElems);
+    }
+  } catch (e) {
+    console.warn(`[PUPPETEER] Deep scan failed: ${e.message}`);
   }
-
-// 2️⃣ Fallback: full-page scan if targeted selectors fail
-if (!priceTexts.length) {
-  // Collect visible text nodes and reassemble split spans (e.g. Target)
-  priceTexts = await page.$$eval('*', els => {
-    return els
-      .filter(el => {
-        const tag = el.tagName.toLowerCase();
-        const visible = !!(el.offsetParent !== null);
-        return visible && tag !== 'script' && tag !== 'style';
-      })
-      .map(el => {
-        // Reassemble nested span fragments like "$" + "299"
-        const text = Array.from(el.querySelectorAll('span'))
-          .map(s => s.textContent.trim())
-          .filter(Boolean)
-          .join('') || el.textContent.trim();
-
-        return text;
-      })
-      .filter(t =>
-        /\$\s?\d/.test(t) ||                // $12, $ 12
-        /\d+\.\d{2}/.test(t) ||             // 12.99
-        /(?:aud|price|now|only)\s*\$?\s*\d+/i.test(t) // Price 59
-      )
-      .map(t => t.replace(/\s+/g, ' ').trim());
-  });
 }
 
+// Post-process: try to merge loose “$” and numeric fragments into full prices
+try {
+  const merged = [];
+  for (let i = 0; i < priceElements.length - 1; i++) {
+    const a = priceElements[i].text;
+    const b = priceElements[i + 1].text;
+    if (/^\$?$/.test(a.trim()) && /^\d/.test(b.trim())) {
+      merged.push({
+        text: a.trim() + b.trim(),
+        top: priceElements[i].top,
+        h: priceElements[i].h,
+      });
+    }
+  }
+  if (merged.length) {
+    console.log(`[PUPPETEER] Merged ${merged.length} fragmented price spans`);
+    priceElements.push(...merged);
+  }
+} catch (e) {
+  console.warn(`[PUPPETEER] Fragment merge failed: ${e.message}`);
+}
 
+      // fallback: scan entire visible DOM if still empty
+      if (!priceElements.length) {
+        priceElements = await page.$$eval('*', els => {
+          return els
+            .filter(el => {
+              const tag = el.tagName.toLowerCase();
+              const visible = !!(el.offsetParent !== null);
+              return visible && tag !== 'script' && tag !== 'style';
+            })
+            .map(el => {
+              const r = el.getBoundingClientRect();
+              const spanText = Array.from(el.querySelectorAll('span, strong, b'))
+                .map(s => s.textContent.trim())
+                .filter(Boolean)
+                .join('');
+              const text = (spanText || el.textContent || '').trim().replace(/\s+/g, ' ');
+              return { text, top: Math.round(r.top), h: Math.round(r.height) };
+            })
+            .filter(e =>
+              /\$\s?\d/.test(e.text) ||
+              /\d+\.\d{2}/.test(e.text) ||
+              /(?:aud|price|now|only)\s*\$?\s*\d+/i.test(e.text)
+            );
+        });
+      }
 
-  // 3️⃣ Reassemble split price spans (Target pattern)
-  try {
-    const spanContainers = await page.$$('[data-test*="price"], [class*="Price"], [class*="price"]');
-    for (const el of spanContainers) {
-      const assembled = await el.evaluate(p =>
-        Array.from(p.querySelectorAll('span'))
-          .map(s => s.textContent.trim())
-          .filter(t => /[\d,$.,]/.test(t))
-          .join('')
+      // deduplicate visible entries
+      priceElements = priceElements.filter(
+        (p, i, arr) => arr.findIndex(x => x.text === p.text && x.top === p.top) === i
       );
-      if (assembled && /\d/.test(assembled)) {
-        const val = parseFloat(assembled.replace(/[^\d.]/g, ''));
-        if (!isNaN(val) && val > 0 && val < 100000) {
-          console.log(`[PUPPETEER] Reassembled price span detected: ${assembled} → ${val}`);
-          priceTexts.push(assembled);
+      
+      //debug
+      // --- DEBUG & aggressive reassembly (insert here, before numeric extraction) ---
+try {
+  // 1) Quick log of what we found so far (first 30)
+  try {
+    console.log('[PUPPETEER][DEBUG] initial priceElements sample:', priceElements.slice(0, 30).map(p => `${p.text.substring(0,100)} @${p.top}`));
+  } catch(e) {
+    console.warn('[PUPPETEER][DEBUG] failed to log priceElements sample:', e.message);
+  }
+
+  // 2) Aggressive neighbor reassembly: join with previous/next sibling text for split spans
+  const reassembled = await page.evaluate(() => {
+    const out = [];
+    const els = Array.from(document.querySelectorAll('*')).filter(el => el.offsetParent !== null);
+    // We'll focus on elements that contain either $ or a decimal-looking number
+    const candidates = els.filter(el => /\$\s?\d/.test(el.textContent) || /\d+\.\d{2}/.test(el.textContent) || /\d{1,3}(?:,\d{3})/.test(el.textContent));
+    for (const el of candidates) {
+      try {
+        const r = el.getBoundingClientRect();
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        // previous & next sibling text (to catch split $ + number)
+        const prev = el.previousElementSibling ? (el.previousElementSibling.textContent || '').trim().replace(/\s+/g,' ') : '';
+        const next = el.nextElementSibling ? (el.nextElementSibling.textContent || '').trim().replace(/\s+/g,' ') : '';
+        // parent combined (sometimes price pieces are siblings inside a parent)
+        const parent = el.parentElement ? (Array.from(el.parentElement.querySelectorAll('span, strong, b')).map(s => s.textContent.trim()).filter(Boolean).join('')) : '';
+        out.push({ text, combinedPrevNext: (prev + ' ' + text + ' ' + next).trim(), parent, top: Math.round(r.top), h: Math.round(r.height) });
+      } catch(e) {
+        // ignore element
+      }
+    }
+    return out;
+  });
+
+  if (Array.isArray(reassembled) && reassembled.length) {
+    console.log(`[PUPPETEER][DEBUG] reassembled candidates found: ${reassembled.length}`);
+    // push unique ones into priceElements (avoid exact text+top dupes)
+    for (const r of reassembled) {
+      const exists = priceElements.some(pe => pe.text === r.text || pe.text === r.combinedPrevNext || pe.top === r.top);
+      if (!exists) priceElements.push({ text: r.combinedPrevNext || r.parent || r.text, top: r.top, h: r.h });
+    }
+  }
+
+  // 3) Scan attributes/meta/aria/title for price-looking strings within product-scoped containers
+  try {
+    const attrPrices = await page.evaluate(() => {
+      const results = [];
+      // meta tags
+      const metaSel = ['meta[itemprop="price"]', 'meta[property="product:price:amount"]', 'meta[name="og:price:amount"]', 'meta[name="twitter:data1"]'];
+      for (const s of metaSel) {
+        const m = document.querySelector(s);
+        if (m && m.content) results.push({ text: m.content.trim(), top: 0, h: 0 });
+      }
+      // attributes like data-price, aria-label, title, data-analytics-price across likely containers
+      const attrEls = Array.from(document.querySelectorAll('[data-price], [data-analytics-price], [data-price-amount], [aria-label], [title]'))
+        .filter(e => e.offsetParent !== null);
+      for (const e of attrEls) {
+        const attrs = [];
+        if (e.getAttribute('data-price')) attrs.push(e.getAttribute('data-price'));
+        if (e.getAttribute('data-analytics-price')) attrs.push(e.getAttribute('data-analytics-price'));
+        if (e.getAttribute('data-price-amount')) attrs.push(e.getAttribute('data-price-amount'));
+        if (e.getAttribute('aria-label')) attrs.push(e.getAttribute('aria-label'));
+        if (e.getAttribute('title')) attrs.push(e.getAttribute('title'));
+        const combined = attrs.filter(Boolean).join(' ').trim();
+        if (combined) {
+          // keep short preview
+          results.push({ text: combined, top: Math.round(e.getBoundingClientRect().top || 0), h: Math.round(e.getBoundingClientRect().height || 0) });
         }
+      }
+      return results;
+    });
+
+    if (Array.isArray(attrPrices) && attrPrices.length) {
+      console.log(`[PUPPETEER][DEBUG] attribute/meta-derived price fragments: ${attrPrices.map(p => p.text.substring(0,80)).slice(0,20)}`);
+      for (const a of attrPrices) {
+        const exists = priceElements.some(pe => pe.text === a.text && pe.top === a.top);
+        if (!exists) priceElements.push({ text: a.text, top: a.top, h: a.h });
       }
     }
   } catch (e) {
-    console.warn(`[PUPPETEER] Reassembly scan failed: ${e.message}`);
+    console.warn('[PUPPETEER][DEBUG] attribute/meta scan failed:', e.message);
   }
 
-  // 4️⃣ Normalize and extract numeric values
-const numericPrices = priceTexts
-  .map(t => parseFloat(t.replace(/[^0-9.]/g, '')))
-  .filter(v =>
-    v && v > 0 && v < 100000 && /^\d{1,4}(\.\d{1,2})?$/.test(v.toString())
-  );
-
-
-  if (numericPrices.length) {
-    console.log(`[PUPPETEER] Visible DOM price candidates: ${numericPrices.join(", ")}`);
-    candidates.push(...numericPrices);
-  } else {
-    console.log(`[PUPPETEER] No visible DOM price text found for ${domain}`);
-  }
+  // 4) Final log of expanded set
+  try {
+    console.log('[PUPPETEER][DEBUG] expanded priceElements sample:', priceElements.slice(0, 60).map(p => `${p.text.substring(0,120)} @${p.top}`));
+  } catch(e) { /* ignore logging errors */ }
 
 } catch (e) {
-  console.warn(`[PUPPETEER] Visible DOM scan failed: ${e.message}`);
+  console.warn('[PUPPETEER][DEBUG] aggressive reassembly failed:', e.message);
+}
+// --- end debug & reassembly ---
+
+      //debug
+
+      // Extract numeric price values with positions
+      const candidatesWithPos = [];
+      for (const el of priceElements) {
+        const t = el.text || '';
+        if (/off|save|each|month|kg|g|ml|pack|bundle|from|was|afterpay|zip/i.test(t)) continue;
+        const matches = (t.match(/\d[\d,]*(?:\.\d{1,2})?/g) || [])
+          .map(x => parseFloat(x.replace(/,/g, '')))
+          .filter(v => v && v > 0 && v < 100000);
+        for (const v of matches) candidatesWithPos.push({ value: v, top: el.top, h: el.h });
+      }
+
+      if (!candidatesWithPos.length) {
+        console.log(`[PUPPETEER] No visible DOM price text found for ${domain}`);
+      } else {
+        const anchorY = anchorRect ? (anchorRect.top + (anchorRect.height || 0) / 2) : null;
+
+        // Group by numeric value and weight by frequency + proximity
+        const freq = {};
+        for (const c of candidatesWithPos) {
+          const key = Math.round((c.value + Number.EPSILON) * 100) / 100;
+          if (!freq[key]) freq[key] = { count: 0, dist: [] };
+          freq[key].count++;
+          if (anchorY !== null) {
+            const mid = (c.top || 0) + (c.h || 0) / 2;
+            freq[key].dist.push(Math.abs(mid - anchorY));
+          }
+        }
+
+        const scored = Object.entries(freq).map(([k, v]) => {
+          const avgDist = v.dist.length ? v.dist.reduce((a, b) => a + b, 0) / v.dist.length : 9999;
+          const score = v.count * (1 / Math.max(1, avgDist / 300));
+          return { value: parseFloat(k), score };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+        const allVals = scored.map(s => s.value);
+
+        console.log(`[PUPPETEER] Visible DOM price candidates: ${allVals.join(", ")}`);
+
+        // push all visible prices for unified selection later
+        for (const s of scored) candidates.push(s.value);
+      }
+    }
+  }
+} catch (e) {
+  console.warn(`[PUPPETEER] Conditional visible DOM scan failed: ${e.message}`);
 }
 
 
-
 // ─────────────────────────────────────────────
-// 🧠 NEW SMART JSON PRICE SELECTION LOGIC
+// NEW SMART JSON PRICE SELECTION LOGIC (enhanced cross-source confidence)
 // ─────────────────────────────────────────────
 if (jsonCandidates.length) {
   console.log(`[PUPPETEER] Inline HTML JSON matches (with positions): ${jsonCandidates.length}`);
@@ -501,7 +750,7 @@ if (jsonCandidates.length) {
   jsonCandidates.sort((a, b) => a.index - b.index);
   console.log(`[PUPPETEER] JSON price order by position:`, jsonCandidates.slice(0, 10));
 
-  // 🧹 1. Normalize prices (handle cents scaling like 5500 → 55)
+  // Normalise JSON values
   for (const c of jsonCandidates) {
     let n = c.price;
     if (n > 9999) n = n / 100;
@@ -509,47 +758,57 @@ if (jsonCandidates.length) {
     c.price = n;
   }
 
-  // 🧠 2. Group near-duplicates (e.g. 55 and 54.99)
-  const clustered = [];
-  const EPS = 0.05; // ±5 cents tolerance
+  // Group near-duplicates (e.g. 49 and 49.00)
+  const EPS = 0.05;
+  const grouped = [];
   for (const c of jsonCandidates) {
-    const existing = clustered.find(g => Math.abs(g.price - c.price) < EPS);
+    const existing = grouped.find(g => Math.abs(g.price - c.price) < EPS);
     if (existing) {
       existing.count++;
       existing.indices.push(c.index);
     } else {
-      clustered.push({ price: c.price, count: 1, indices: [c.index] });
+      grouped.push({ price: c.price, count: 1, indices: [c.index] });
     }
   }
 
-  // 🏆 3. Sort by first appearance in the document
-  clustered.sort((a, b) => a.indices[0] - b.indices[0]);
+  // Sort by earliest occurrence
+  grouped.sort((a, b) => a.indices[0] - b.indices[0]);
 
-  // Find the most frequent price(s)
-  const maxCount = Math.max(...clustered.map(c => c.count));
-  const mostFrequent = clustered.filter(c => c.count === maxCount);
+  // Log frequency data for visibility
+  console.log(`[PUPPETEER] JSON grouped frequency:`, grouped.map(g => `${g.price} (${g.count}×)`));
 
-  // 🧩 4. Choose preferred candidate
-  let mainLikelyPrice = null;
-  if (mostFrequent.length === 1) {
-    mainLikelyPrice = mostFrequent[0].price;
-  } else {
-    mainLikelyPrice = mostFrequent[0].price; // earliest among ties
-  }
+  // Find most frequent JSON value(s)
+  const maxCount = Math.max(...grouped.map(g => g.count));
+  const mostFrequentJSON = grouped.filter(g => g.count === maxCount);
 
-  // 🥇 5. Overwhelming dominance rule (3× more frequent)
-  const sortedCounts = [...clustered].sort((a, b) => b.count - a.count);
+  let jsonLikelyPrice = mostFrequentJSON[0]?.price ?? null;
+
+  // If overwhelmingly dominant (3× more frequent), lock it in
+  const sortedCounts = [...grouped].sort((a, b) => b.count - a.count);
   if (sortedCounts.length > 1 && sortedCounts[0].count >= sortedCounts[1].count * 3) {
-    mainLikelyPrice = sortedCounts[0].price;
-    console.log(`[PUPPETEER] Overwhelming repetition detected (${sortedCounts[0].count}× vs ${sortedCounts[1].count}×)`);
+    jsonLikelyPrice = sortedCounts[0].price;
+    console.log(`[PUPPETEER] JSON overwhelming repetition detected (${sortedCounts[0].count}× vs ${sortedCounts[1].count}×)`);
   }
 
-  console.log(`[PUPPETEER] JSON positional preferred price: $${mainLikelyPrice}`);
-  candidates.push(mainLikelyPrice);
+  // Cross-check: does this JSON price appear frequently in inline/DOM candidates?
+  const matchInOtherSources = candidates.filter(v => Math.abs(v - jsonLikelyPrice) < 0.05).length;
+  if (jsonLikelyPrice && matchInOtherSources > 0) {
+    console.log(`[PUPPETEER] JSON price $${jsonLikelyPrice} also found ${matchInOtherSources}× in HTML/network candidates — boosting confidence.`);
+  }
+
+  // If JSON and HTML agree or JSON is dominant, use it preferentially
+  if (jsonLikelyPrice && (mostFrequentJSON.length > 1 || matchInOtherSources > 0)) {
+    console.log(`[PUPPETEER] ✅ Selecting JSON-derived price due to consistency: $${jsonLikelyPrice}`);
+    candidates.push(jsonLikelyPrice);
+  } else if (jsonLikelyPrice) {
+    console.log(`[PUPPETEER] JSON positional preferred price: $${jsonLikelyPrice}`);
+    candidates.push(jsonLikelyPrice);
+  }
 }
 // ─────────────────────────────────────────────
 // END NEW SMART JSON PRICE SELECTION LOGIC
 // ─────────────────────────────────────────────
+
 
 
 
@@ -698,43 +957,62 @@ for (const c of jsonCandidates) candidates.push(c.price);
       // ignore
     }
 
-    let finalPrice = null;
-    if (candidates.length > 0) {
-      const counts = {};
-      for (const v of candidates) {
-        // Round to 2 decimals for counting to avoid floating point issues
-        const rounded = Math.round((v + Number.EPSILON) * 100) / 100;
-        counts[rounded] = (counts[rounded] || 0) + 1;
-      }
-      const sorted = Object.entries(counts).sort((a, b) => {
-        const freqDiff = b[1] - a[1];
-        if (freqDiff !== 0) return freqDiff;
+let finalPrice = null;
+if (candidates.length > 0) {
+  // Normalise all candidate values before picking final price
+  const normalisedCandidates = normaliseCandidateValues(candidates);
+  candidates.length = 0;
+  candidates.push(...normalisedCandidates);
 
-        const valA = parseFloat(a[0]);
-        const valB = parseFloat(b[0]);
+  const counts = {};
+  for (const v of candidates) {
+    // Round to 2 decimals for counting to avoid floating point issues
+    const rounded = Math.round((v + Number.EPSILON) * 100) / 100;
+    counts[rounded] = (counts[rounded] || 0) + 1;
+  }
 
-        // Prefer values with fractional parts (e.g., 67.23 over 67 or 23)
-        const fracA = Math.abs(valA % 1) > 0.001 ? 1 : 0;
-        const fracB = Math.abs(valB % 1) > 0.001 ? 1 : 0;
-        const fracDiff = fracB - fracA;
-        if (fracDiff !== 0) return fracDiff;
+  const sorted = Object.entries(counts).sort((a, b) => {
+    const freqDiff = b[1] - a[1];
+    if (freqDiff !== 0) return freqDiff;
 
-        // If tie, prefer smaller value (assuming sale/current price is lower)
-        return valA - valB;
-      });
-      finalPrice = parseFloat(sorted[0][0]);
-      console.log(`[PUPPETEER] Candidates: ${[...new Set(candidates)].join(", ")} → chosen: $${finalPrice}`);
-    } else {
-      console.log(`[PUPPETEER] No price candidates found for ${url}`);
-    }
+    const valA = parseFloat(a[0]);
+    const valB = parseFloat(b[0]);
 
-    let error = null;
-    if (finalPrice === null) {
-      error = "no price found";
-    }
+    // Prefer values with fractional parts (e.g., 67.23 over 67 or 23)
+    const fracA = Math.abs(valA % 1) > 0.001 ? 1 : 0;
+    const fracB = Math.abs(valB % 1) > 0.001 ? 1 : 0;
+    const fracDiff = fracB - fracA;
+    if (fracDiff !== 0) return fracDiff;
 
-    await browser.close().catch(() => {});
-    return { price: finalPrice || null, error };
+    // If tie, prefer smaller value (assuming sale/current price is lower)
+    return valA - valB;
+  });
+
+  finalPrice = parseFloat(sorted[0][0]);
+  console.log(`[PUPPETEER] Candidates: ${[...new Set(candidates)].join(", ")} → chosen: $${finalPrice}`);
+} else {
+  console.log(`[PUPPETEER] No price candidates found for ${url}`);
+}
+
+let error = null;
+if (finalPrice === null) {
+  error = "no price found";
+}
+
+await browser.close().catch(() => {});
+
+if (outOfStockDetected) {
+  // Only treat as out of stock if price is missing or changed
+  if (!finalPrice) {
+    console.log(`[PUPPETEER] Out of stock detected and no price found`);
+    return { price: null, error: "out of stock" };
+  } else {
+    console.log(`[PUPPETEER] Out of stock text detected but price still available ($${finalPrice}) — ignoring`);
+  }
+}
+
+return { price: finalPrice || null, error };
+
 
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
@@ -974,7 +1252,7 @@ app.post("/api/items/:id/update", async (req, res) => {
         if (result.price != null && !result.error && site.currentPrice != null) {
           const oldPrice = site.currentPrice;
           const changeRatio = Math.abs(result.price - oldPrice) / oldPrice;
-          if (changeRatio > 0.5) {
+          if (changeRatio > 0.7) {
             console.log(`[UPDATE ITEM] Big price change detected for ${site.url}: old $${oldPrice} new $${result.price}, treating as out of stock`);
             result = { price: null, error: "out of stock" };
           }
@@ -1181,4 +1459,42 @@ cron.schedule("0 */12 * * *", async () => {
 
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
+});
+
+// Add this near the top of server.js, after your imports
+const serverLogs = [];
+const MAX_LOGS = 200; // Keep last 200 log entries
+
+// Capture console.log output
+const originalConsoleLog = console.log;
+const originalConsoleWarn = console.warn;
+const originalConsoleError = console.error;
+
+console.log = function(...args) {
+  const timestamp = new Date().toLocaleString();
+  const message = `[${timestamp}] ${args.join(' ')}`;
+  serverLogs.push(message);
+  if (serverLogs.length > MAX_LOGS) serverLogs.shift();
+  originalConsoleLog.apply(console, args);
+};
+
+console.warn = function(...args) {
+  const timestamp = new Date().toLocaleString();
+  const message = `[${timestamp}] ⚠️ ${args.join(' ')}`;
+  serverLogs.push(message);
+  if (serverLogs.length > MAX_LOGS) serverLogs.shift();
+  originalConsoleWarn.apply(console, args);
+};
+
+console.error = function(...args) {
+  const timestamp = new Date().toLocaleString();
+  const message = `[${timestamp}] ❌ ${args.join(' ')}`;
+  serverLogs.push(message);
+  if (serverLogs.length > MAX_LOGS) serverLogs.shift();
+  originalConsoleError.apply(console, args);
+};
+
+// Add this endpoint with your other API routes (before app.listen)
+app.get("/api/logs", (req, res) => {
+  res.json({ logs: serverLogs });
 });
