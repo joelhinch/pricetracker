@@ -172,36 +172,69 @@
     function formatPrice(v){ return v==null ? '—' : '$'+Number(v).toFixed(2); }
 
     function isNewLow(p) {
-      // Only show "new low" if:
-      // 1. There's a current price
-      // 2. There's historical data (more than 1 price point)
-      // 3. Current price equals min price
-      // 4. This is genuinely the lowest (not just initial entry)
-      if (!p.currentPrice || !p.minPrice) return false;
+  // Only show "new low" if:
+  // 1. There's a current price
+  // 2. There's historical data (more than 1 price point)
+  // 3. Current price equals min price
+  // 4. This is genuinely the lowest (not just initial entry)
+  // 5. This price became the new low within the last 14 days
+  if (!p.currentPrice || !p.minPrice) return false;
+  
+  const allPrices = p.sites.flatMap(s => (s.history || [])).filter(Boolean);
+  if (allPrices.length <= 1) return false; // Only 1 data point means it's brand new
+  
+  // Also check that min and max are different (proves there's price variation)
+  if (p.minPrice === p.maxPrice) return false;
+  
+  // Check if current price is the historical low
+  if (Math.abs(p.currentPrice - p.minPrice) >= 0.01) return false;
+  
+  // Now check if this became a NEW low within the last 14 days
+  const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
+  
+  // Find the FIRST time this low price appeared
+  let firstLowDate = null;
+  
+  for (const site of (p.sites || [])) {
+    if (!site.history || !site.historyDates) continue;
+    
+    for (let i = 0; i < site.history.length; i++) {
+      const price = site.history[i];
+      const date = site.historyDates[i];
       
-      const allPrices = p.sites.flatMap(s => (s.history || [])).filter(Boolean);
-      if (allPrices.length <= 1) return false; // Only 1 data point means it's brand new
-      
-      // Also check that min and max are different (proves there's price variation)
-      if (p.minPrice === p.maxPrice) return false;
-      
-      return Math.abs(p.currentPrice - p.minPrice) < 0.01;
+      // If this is the low price
+      if (Math.abs(price - p.minPrice) < 0.01) {
+        const priceDate = new Date(date).getTime();
+        // Track the earliest occurrence
+        if (!firstLowDate || priceDate < firstLowDate) {
+          firstLowDate = priceDate;
+        }
+      }
     }
+  }
+  
+  // Only show badge if the first occurrence of this low was within 14 days
+  if (firstLowDate && firstLowDate >= fourteenDaysAgo) {
+    return true;
+  }
+  
+  return false;
+}
 
-    function calculateDiscount(current, reference, isVsHigh) {
-      if (current == null || reference == null) return null;
-      
-      // Don't show discount if they're the same (no price history variation)
-      if (Math.abs(current - reference) < 0.01) return null;
-      
-      const diff = current - reference;
-      const percent = (diff / reference) * 100;
-      return {
-        percent: Math.abs(percent).toFixed(1),
-        isDiscount: isVsHigh ? diff < 0 : diff > 0,
-        raw: percent
-      };
-    }
+function calculateDiscount(current, reference, isVsHigh) {
+  if (current == null || reference == null) return null;
+  
+  // Don't show discount if they're the same (no price history variation)
+  if (Math.abs(current - reference) < 0.01) return null;
+  
+  const diff = current - reference;
+  const percent = (diff / reference) * 100;
+  return {
+    percent: Math.abs(percent).toFixed(1),
+    isDiscount: isVsHigh ? diff < 0 : diff > 0,
+    raw: percent
+  };
+}
 
     function matchesDomainFilter(p) {
       if (!currentDomainFilter) return true;
